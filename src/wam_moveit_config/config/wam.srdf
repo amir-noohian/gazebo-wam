@@ -1,0 +1,69 @@
+<?xml version="1.0" ?>
+
+<robot name="wam">
+
+    <!-- WAM 7-DOF planning group -->
+    <group name="arm">
+        <chain
+            base_link="wam/base_link"
+            tip_link="wam/wrist_palm_stump_link"/>
+    </group>
+
+    <!-- Starting configuration -->
+    <group_state name="home" group="arm">
+        <joint name="wam/base_yaw_joint" value="0"/>
+        <joint name="wam/shoulder_pitch_joint" value="0"/>
+        <joint name="wam/shoulder_yaw_joint" value="0"/>
+        <joint name="wam/elbow_pitch_joint" value="0"/>
+        <joint name="wam/wrist_yaw_joint" value="0"/>
+        <joint name="wam/wrist_pitch_joint" value="0"/>
+        <joint name="wam/palm_yaw_joint" value="0"/>
+    </group_state>
+
+    <!-- Adjacent links -->
+    <disable_collisions
+        link1="wam/base_link"
+        link2="wam/shoulder_yaw_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/shoulder_yaw_link"
+        link2="wam/shoulder_pitch_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/shoulder_pitch_link"
+        link2="wam/upper_arm_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/upper_arm_link"
+        link2="wam/forearm_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/forearm_link"
+        link2="wam/wrist_yaw_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/wrist_yaw_link"
+        link2="wam/wrist_pitch_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/wrist_pitch_link"
+        link2="wam/wrist_palm_link"
+        reason="Adjacent"/>
+
+    <disable_collisions
+        link1="wam/wrist_palm_link"
+        link2="wam/wrist_palm_stump_link"
+        reason="Adjacent"/>
+        
+    <disable_collisions
+	link1="wam/forearm_link"
+	link2="wam/wrist_pitch_link"
+	reason="Default"/>
+
+</robot>

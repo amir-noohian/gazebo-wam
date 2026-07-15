@@ -1,0 +1,11 @@
+planner_configs:
+
+  RRTConnect:
+    type: geometric::RRTConnect
+
+
+arm:
+  planner_configs:
+    - RRTConnect
+
+  longest_valid_segment_fraction: 0.01
