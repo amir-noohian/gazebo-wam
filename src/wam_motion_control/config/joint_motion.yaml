@@ -1,0 +1,22 @@
+wam_joint_motion:
+  ros__parameters:
+    planning_group: arm
+    controller_action: /arm_controller/follow_joint_trajectory
+
+    velocity_scaling: 0.2
+    acceleration_scaling: 0.2
+    planning_time: 5.0
+
+    server_timeout: 10.0
+    state_timeout: 10.0
+    controller_timeout: 10.0
+    plan_only: false
+
+    joint_targets:
+      wam/base_yaw_joint: 0.0
+      wam/shoulder_pitch_joint: -0.4
+      wam/shoulder_yaw_joint: 0.2
+      wam/elbow_pitch_joint: 1.2
+      wam/wrist_yaw_joint: 0.5
+      wam/wrist_pitch_joint: 0.4
+      wam/palm_yaw_joint: 0.0

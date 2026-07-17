@@ -1,0 +1,37 @@
+wam_cartesian_motion:
+  ros__parameters:
+    planning_group: arm
+    end_effector_link: wam/wrist_palm_stump_link
+    pose_reference_frame: wam/base_link
+    controller_action: /arm_controller/follow_joint_trajectory
+
+    # Relative mode adds XYZ in the reference frame and applies RPY around
+    # the end effector's current local axes. Absolute mode uses the values as
+    # a complete pose in pose_reference_frame.
+    relative: true
+    target_position:
+      x: 0.0
+      y: 0.0
+      z: -0.05
+    target_orientation_rpy:
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+
+    # true follows a sampled Cartesian line; false uses OMPL to reach the pose.
+    linear_path: false
+    eef_step: 0.005
+    jump_threshold: 1.0
+    minimum_path_fraction: 0.99
+    avoid_collisions: true
+
+    position_tolerance: 0.005
+    orientation_tolerance: 0.01
+    velocity_scaling: 0.2
+    acceleration_scaling: 0.2
+    planning_time: 5.0
+
+    server_timeout: 10.0
+    state_timeout: 10.0
+    controller_timeout: 10.0
+    plan_only: false

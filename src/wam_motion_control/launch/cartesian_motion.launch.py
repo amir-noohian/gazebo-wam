@@ -30,9 +30,9 @@ def generate_launch_description():
         default_value=os.path.join(
             get_package_share_directory("wam_motion_control"),
             "config",
-            "joint_motion.yaml"
+            "cartesian_motion.yaml"
         ),
-        description="YAML file containing the motion target and client settings"
+        description="YAML file containing the Cartesian target and settings"
     )
 
     plan_only_arg = DeclareLaunchArgument(
@@ -47,9 +47,6 @@ def generate_launch_description():
         description="Use the Gazebo simulation clock"
     )
 
-    # ---------------------------------------------------------
-    # URDF
-    # ---------------------------------------------------------
     xacro_file = os.path.join(
         get_package_share_directory("wam_description"),
         "robots",
@@ -61,9 +58,6 @@ def generate_launch_description():
         xacro.process_file(xacro_file).toxml()
     }
 
-    # ---------------------------------------------------------
-    # SRDF
-    # ---------------------------------------------------------
     srdf_file = os.path.join(
         get_package_share_directory("wam_moveit_config"),
         "config",
@@ -75,25 +69,16 @@ def generate_launch_description():
             "robot_description_semantic": file.read()
         }
 
-    # ---------------------------------------------------------
-    # MoveIt kinematics configuration
-    # ---------------------------------------------------------
-    kinematics_yaml = load_yaml(
-        "wam_moveit_config",
-        "config/kinematics.yaml"
-    )
-
     robot_description_kinematics = {
-        "robot_description_kinematics": kinematics_yaml
+        "robot_description_kinematics": load_yaml(
+            "wam_moveit_config",
+            "config/kinematics.yaml"
+        )
     }
 
-    # ---------------------------------------------------------
-    # Joint motion node
-    # ---------------------------------------------------------
-    joint_motion_node = Node(
+    cartesian_motion_node = Node(
         package="wam_motion_control",
-        executable="joint_motion",
-        name="wam_joint_motion",
+        executable="cartesian_motion",
         output="screen",
         parameters=[
             config_file,
@@ -111,5 +96,5 @@ def generate_launch_description():
         config_file_arg,
         plan_only_arg,
         use_sim_time_arg,
-        joint_motion_node
+        cartesian_motion_node
     ])
