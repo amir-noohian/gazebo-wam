@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<library path="wam_model_controller">
+
+  <class
+      name="wam_model_controller/WamModelController"
+      type="wam_model_controller::WamModelController"
+      base_class_type="controller_interface::ControllerInterface">
+
+    <description>
+      Model-based controller for the Barrett WAM.
+    </description>
+
+  </class>
+
+</library>

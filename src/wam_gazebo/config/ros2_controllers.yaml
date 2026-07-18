@@ -7,7 +7,9 @@ controller_manager:
 
     arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController
-
+      
+    wam_model_controller:
+      type: wam_model_controller/WamModelController
 
 arm_controller:
   ros__parameters:
@@ -26,3 +28,43 @@ arm_controller:
     state_interfaces:
       - position
       - velocity
+
+wam_model_controller:
+  ros__parameters:
+    hold_current_position: true
+
+    q_des:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.5
+      - 0.0
+      - 0.0
+      - 0.0
+
+    kp:
+      - 50.0
+      - 80.0
+      - 50.0
+      - 40.0
+      - 10.0
+      - 10.0
+      - 5.0
+
+    kd:
+      - 5.0
+      - 8.0
+      - 5.0
+      - 4.0
+      - 1.0
+      - 1.0
+      - 0.5
+
+    torque_limits:
+      - 20.0
+      - 20.0
+      - 20.0
+      - 20.0
+      - 10.0
+      - 10.0
+      - 5.0
