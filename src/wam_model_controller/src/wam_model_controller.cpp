@@ -1,7 +1,17 @@
 #include <algorithm>
+#include <chrono>
+#include <memory>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <iomanip>
+
 #include "wam_model_controller/wam_model_controller.hpp"
+
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "kdl_parser/kdl_parser.hpp"
 #include "pluginlib/class_list_macros.hpp"
+#include "rclcpp/parameter_client.hpp"
 
 namespace wam_model_controller
 {
@@ -33,11 +43,11 @@ WamModelController::init(const std::string & controller_name)
 
   auto_declare<std::vector<double>>(
     "kp",
-    {50.0, 80.0, 50.0, 40.0, 10.0, 10.0, 5.0});
+    {50.0, 80.0, 50.0, 40.0, 10.0, 10.0, 0.2});
 
   auto_declare<std::vector<double>>(
     "kd",
-    {5.0, 8.0, 5.0, 4.0, 1.0, 1.0, 0.5});
+    {5.0, 8.0, 5.0, 4.0, 1.0, 1.0, 0.01});
 
   auto_declare<std::vector<double>>(
     "torque_limits",
@@ -46,6 +56,14 @@ WamModelController::init(const std::string & controller_name)
   auto_declare<bool>(
     "hold_current_position",
     true);
+
+  auto_declare<std::string>(
+    "root_link",
+    "wam/base_link");
+
+  auto_declare<std::string>(
+    "tip_link",
+    "wam/wrist_palm_link");
 
   RCLCPP_INFO(
     get_node()->get_logger(),
@@ -116,6 +134,12 @@ WamModelController::on_configure(
   hold_current_position_ =
     get_node()->get_parameter("hold_current_position").as_bool();
 
+  root_link_ =
+    get_node()->get_parameter("root_link").as_string();
+
+  tip_link_ =
+    get_node()->get_parameter("tip_link").as_string();
+
   if (
     q_des_.size() != number_of_joints ||
     kp_.size() != number_of_joints ||
@@ -131,6 +155,137 @@ WamModelController::on_configure(
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
   }
+
+  /*
+   * The controller node is already managed by the controller manager's
+   * executor. Therefore, do not create SyncParametersClient using get_node().
+   *
+   * We create a separate temporary node to retrieve robot_description from
+   * robot_state_publisher.
+   */
+  auto parameter_client_node =
+    std::make_shared<rclcpp::Node>(
+      "wam_model_controller_parameter_client");
+
+  auto parameter_client =
+    std::make_shared<rclcpp::SyncParametersClient>(
+      parameter_client_node,
+      "/robot_state_publisher");
+
+  if (!parameter_client->wait_for_service(std::chrono::seconds(5)))
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Parameter service for /robot_state_publisher is not available.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  const auto robot_description_parameters =
+    parameter_client->get_parameters(
+      {"robot_description"});
+
+  if (
+    robot_description_parameters.empty() ||
+    robot_description_parameters[0].get_type() !=
+    rclcpp::ParameterType::PARAMETER_STRING)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Could not retrieve robot_description from /robot_state_publisher.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  const std::string robot_description =
+    robot_description_parameters[0].as_string();
+
+  if (robot_description.empty())
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "robot_description retrieved from /robot_state_publisher is empty.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  kdl_initialized_ = false;
+  kdl_dynamics_solver_.reset();
+
+  if (!kdl_parser::treeFromString(robot_description, kdl_tree_))
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Failed to create the KDL tree from robot_description.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  if (!kdl_tree_.getChain(root_link_, tip_link_, kdl_chain_))
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Failed to create KDL chain from '%s' to '%s'.",
+      root_link_.c_str(),
+      tip_link_.c_str());
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  const std::size_t kdl_joint_count =
+    kdl_chain_.getNrOfJoints();
+
+  if (kdl_joint_count != number_of_joints)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "KDL chain contains %zu joints, but controller expects %zu.",
+      kdl_joint_count,
+      number_of_joints);
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  kdl_q_.resize(kdl_joint_count);
+  kdl_gravity_.resize(kdl_joint_count);
+
+  /*
+   * Gravity is expressed in the KDL chain root frame.
+   *
+   * Since wam/base_link is aligned with the Gazebo world frame in your URDF,
+   * gravity acts along negative Z.
+   */
+  const KDL::Vector gravity_vector(
+    0.0,
+    0.0,
+    -9.81);
+
+  kdl_dynamics_solver_ =
+    std::make_unique<KDL::ChainDynParam>(
+      kdl_chain_,
+      gravity_vector);
+
+  kdl_initialized_ = true;
+
+  RCLCPP_INFO(
+    get_node()->get_logger(),
+    "KDL initialized: %s -> %s, %zu joints, %u segments.",
+    root_link_.c_str(),
+    tip_link_.c_str(),
+    kdl_joint_count,
+    kdl_chain_.getNrOfSegments());
 
   RCLCPP_INFO(
     get_node()->get_logger(),
@@ -175,10 +330,24 @@ WamModelController::on_activate(
       CallbackReturn::ERROR;
   }
 
+  if (!kdl_initialized_ || !kdl_dynamics_solver_)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Cannot activate controller because KDL is not initialized.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
   for (std::size_t i = 0; i < joint_names_.size(); ++i)
   {
-    q_[i] = state_interfaces_[2 * i].get_value();
-    dq_[i] = state_interfaces_[2 * i + 1].get_value();
+    q_[i] =
+      state_interfaces_[2 * i].get_value();
+
+    dq_[i] =
+      state_interfaces_[2 * i + 1].get_value();
 
     if (hold_current_position_)
     {
@@ -210,13 +379,16 @@ rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 WamModelController::on_deactivate(
   const rclcpp_lifecycle::State & /* previous_state */)
 {
-    for (std::size_t i = 0; i < joint_names_.size(); ++i)
-{
-  q_[i] = state_interfaces_[2 * i].get_value();
-  dq_[i] = state_interfaces_[2 * i + 1].get_value();
+  for (std::size_t i = 0; i < joint_names_.size(); ++i)
+  {
+    q_[i] =
+      state_interfaces_[2 * i].get_value();
 
-  q_des_[i] = q_[i];
-}
+    dq_[i] =
+      state_interfaces_[2 * i + 1].get_value();
+
+    q_des_[i] = q_[i];
+  }
 
   for (auto & command_interface : command_interfaces_)
   {
@@ -235,40 +407,162 @@ WamModelController::on_deactivate(
 controller_interface::return_type
 WamModelController::update()
 {
+  if (!kdl_initialized_ || !kdl_dynamics_solver_)
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "KDL dynamics solver is not initialized.");
+
+    return controller_interface::return_type::ERROR;
+  }
+
+  /*
+   * First read every joint state and copy the joint positions into the KDL
+   * joint array. Gravity must be calculated using the complete configuration.
+   */
   for (std::size_t i = 0; i < joint_names_.size(); ++i)
   {
-    q_[i] = state_interfaces_[2 * i].get_value();
-    dq_[i] = state_interfaces_[2 * i + 1].get_value();
+    q_[i] =
+      state_interfaces_[2 * i].get_value();
 
+    dq_[i] =
+      state_interfaces_[2 * i + 1].get_value();
+
+    if (!std::isfinite(q_[i]) || !std::isfinite(dq_[i]))
+    {
+      RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(),
+        *get_node()->get_clock(),
+        2000,
+        "Invalid state for joint %s: q=%f, dq=%f.",
+        joint_names_[i].c_str(),
+        q_[i],
+        dq_[i]);
+
+      for (auto & command_interface : command_interfaces_)
+      {
+        command_interface.set_value(0.0);
+      }
+
+      return controller_interface::return_type::ERROR;
+    }
+
+    kdl_q_(i) = q_[i];
+  }
+
+  /*
+   * Calculate the gravity torque vector:
+   *
+   *     g(q)
+   */
+  const int gravity_result =
+    kdl_dynamics_solver_->JntToGravity(
+      kdl_q_,
+      kdl_gravity_);
+
+  if (gravity_result < 0)
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "KDL failed to calculate gravity. Error code: %d.",
+      gravity_result);
+
+    for (auto & command_interface : command_interfaces_)
+    {
+      command_interface.set_value(0.0);
+    }
+
+    return controller_interface::return_type::ERROR;
+  }
+
+  /*
+   * Gravity compensation plus joint-space PD:
+   *
+   * tau = g(q) + Kp(q_des - q) - Kd*dq
+   */
+  for (std::size_t i = 0; i < joint_names_.size(); ++i)
+  {
     const double position_error =
       q_des_[i] - q_[i];
 
-    const double raw_torque =
+    const double gravity_torque =
+      kdl_gravity_(i);
+
+    const double pd_torque =
       kp_[i] * position_error -
       kd_[i] * dq_[i];
 
-    const double torque =
-    std::max(
-        -torque_limits_[i],
-        std::min(raw_torque, torque_limits_[i]));
+    const double raw_torque =
+      gravity_torque + pd_torque;
 
-    command_interfaces_[i].set_value(torque);
+    const double limited_torque =
+      std::max(
+        -torque_limits_[i],
+        std::min(
+          raw_torque,
+          torque_limits_[i]));
+
+    if (!std::isfinite(limited_torque))
+    {
+      RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(),
+        *get_node()->get_clock(),
+        2000,
+        "Invalid torque calculated for joint %s.",
+        joint_names_[i].c_str());
+
+      command_interfaces_[i].set_value(0.0);
+      continue;
+    }
+
+    command_interfaces_[i].set_value(limited_torque);
+  }
+
+  std::ostringstream log_stream;
+
+  log_stream << std::fixed << std::setprecision(3);
+  log_stream << "\nWAM controller state:\n";
+
+  for (std::size_t i = 0; i < joint_names_.size(); ++i)
+  {
+    const double position_error =
+      q_des_[i] - q_[i];
+
+    const double pd_torque =
+      kp_[i] * position_error -
+      kd_[i] * dq_[i];
+
+    const double commanded_torque =
+      command_interfaces_[i].get_value();
+
+    log_stream
+      << "[" << i << "] "
+      << joint_names_[i]
+      << " | q: " << q_[i]
+      << " | q_des: " << q_des_[i]
+      << " | dq: " << dq_[i]
+      << " | error: " << position_error
+      << " | gravity: " << kdl_gravity_(i)
+      << " | PD: " << pd_torque
+      << " | command: " << commanded_torque
+      << "\n";
   }
 
   RCLCPP_INFO_THROTTLE(
     get_node()->get_logger(),
     *get_node()->get_clock(),
     2000,
-    "Joint 1: q=%.3f, q_des=%.3f, dq=%.3f, tau=%.3f",
-    q_[0],
-    q_des_[0],
-    dq_[0],
-    command_interfaces_[0].get_value());
+    "%s",
+    log_stream.str().c_str());
 
   return controller_interface::return_type::OK;
 }
 
-}   // namespace wam_model_controller
+}  // namespace wam_model_controller
 
 PLUGINLIB_EXPORT_CLASS(
   wam_model_controller::WamModelController,

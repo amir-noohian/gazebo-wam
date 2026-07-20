@@ -31,13 +31,15 @@ arm_controller:
 
 wam_model_controller:
   ros__parameters:
-    hold_current_position: true
+    root_link: "wam/base_link"
+    tip_link: "wam/wrist_palm_link"
+    hold_current_position: false
 
     q_des:
       - 0.0
+      - 0.2
       - 0.0
       - 0.0
-      - 1.5
       - 0.0
       - 0.0
       - 0.0
@@ -48,8 +50,8 @@ wam_model_controller:
       - 50.0
       - 40.0
       - 10.0
-      - 10.0
-      - 5.0
+      - 2.0
+      - 1.0
 
     kd:
       - 5.0
@@ -57,8 +59,8 @@ wam_model_controller:
       - 5.0
       - 4.0
       - 1.0
-      - 1.0
-      - 0.5
+      - 0.2
+      - 0.1
 
     torque_limits:
       - 20.0

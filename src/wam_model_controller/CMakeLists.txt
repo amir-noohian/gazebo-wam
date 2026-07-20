@@ -23,6 +23,10 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 
+find_package(orocos_kdl REQUIRED)
+find_package(kdl_parser REQUIRED)
+find_package(urdf REQUIRED)
+
 add_library(
   wam_model_controller
   SHARED
@@ -42,6 +46,9 @@ ament_target_dependencies(
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  orocos_kdl
+  kdl_parser
+  urdf
 )
 
 pluginlib_export_plugin_description_file(
