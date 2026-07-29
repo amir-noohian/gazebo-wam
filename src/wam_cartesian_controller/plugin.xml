@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+
+<library path="wam_cartesian_controller">
+
+  <class
+    name="wam_cartesian_controller/WamCartesianController"
+    type="wam_cartesian_controller::WamCartesianController"
+    base_class_type="controller_interface::ControllerInterface">
+
+    <description>
+      Cartesian-space effort controller for the Barrett WAM.
+    </description>
+
+  </class>
+
+</library>
