@@ -105,6 +105,17 @@ private:
   // True after the KDL model has been created successfully
   bool kdl_initialized_{false};
 
+  Eigen::Vector3d trajectory_start_position_;
+  Eigen::Vector3d trajectory_target_position_;
+  Eigen::Vector3d desired_linear_velocity_;
+
+  rclcpp::Time trajectory_start_time_;
+
+  double trajectory_duration_{5.0};
+
+  bool trajectory_initialized_{false};
+  bool trajectory_active_{false};
+
 };
 
 }  // namespace wam_cartesian_controller

@@ -61,7 +61,8 @@ def generate_launch_description():
             gazebo_launch_file
         ),
         launch_arguments={
-            "gui": gui
+            "gui": gui,
+            "pause": "true",
         }.items()
     )
 
@@ -112,29 +113,56 @@ def generate_launch_description():
             "bash",
             "-c",
             (
-                "echo 'Waiting for controller_manager to respond...'; "
+                "set -e; "
+
+                "echo 'Waiting for controller_manager...'; "
 
                 "until ros2 service call "
                 "/controller_manager/list_controllers "
                 "controller_manager_msgs/srv/ListControllers "
                 "'{}' >/dev/null 2>&1; "
                 "do "
-                "  sleep 1; "
+                "  sleep 0.2; "
                 "done; "
 
-                "echo 'controller_manager is responding'; "
+                "echo 'Loading joint_state_broadcaster'; "
 
                 "ros2 run controller_manager spawner.py "
                 "joint_state_broadcaster "
-                "--controller-manager /controller_manager; "
+                "--controller-manager /controller_manager "
+                "--stopped; "
 
-                "if [ $? -ne 0 ]; then "
-                "  echo 'Failed to start joint_state_broadcaster'; "
-                "  exit 1; "
-                "fi; "
+                "echo 'Loading Cartesian controller'; "
 
                 "ros2 run controller_manager spawner.py "
-                "arm_controller "
+                "wam_cartesian_controller "
+                "--controller-manager /controller_manager "
+                "--stopped; "
+
+                "echo 'Unpausing Gazebo'; "
+
+                "ros2 service call "
+                "/unpause_physics "
+                "std_srvs/srv/Empty "
+                "'{}' >/dev/null; "
+
+                "echo 'Activating controllers'; "
+
+                "ros2 service call "
+                "/controller_manager/switch_controller "
+                "controller_manager_msgs/srv/SwitchController "
+                "\"{"
+                "start_controllers: "
+                "[joint_state_broadcaster, wam_cartesian_controller], "
+                "stop_controllers: [], "
+                "strictness: 2, "
+                "start_asap: true, "
+                "timeout: {sec: 0, nanosec: 0}"
+                "}\"; "
+
+                "echo 'Controller states:'; "
+
+                "ros2 control list_controllers "
                 "--controller-manager /controller_manager"
             )
         ],

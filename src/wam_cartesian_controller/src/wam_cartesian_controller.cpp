@@ -261,10 +261,15 @@ WamCartesianController::on_configure(
   kdl_q_.resize(kdl_joint_count);
   kdl_gravity_.resize(kdl_joint_count);
 
-  desired_position_ << 0.05, 0.0, 1.196;
+  desired_position_.setZero();
 
-  cartesian_kp_ << 50.0, 50.0, 50.0;
-  cartesian_kd_ << 2.0, 2.0, 2.0;
+  cartesian_kp_ << 30.0, 30.0, 30.0;
+  cartesian_kd_ << 10.0, 10.0, 10.0;
+
+
+  desired_linear_velocity_.setZero();
+  trajectory_start_position_.setZero();
+  trajectory_target_position_.setZero();
 
   /*
    * Gravity is expressed in the KDL chain root frame.
@@ -467,8 +472,40 @@ WamCartesianController::on_activate(
       q_des_[i] = q_[i];
     }
 
-    command_interfaces_[i].set_value(0.0);
+    // command_interfaces_[i].set_value(0.0);
   }
+
+  const int gravity_result =
+    kdl_dynamics_solver_->JntToGravity(
+      kdl_q_,
+      kdl_gravity_);
+
+  if (gravity_result < 0)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Failed to calculate initial gravity torque.");
+
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  for (std::size_t i = 0; i < joint_names_.size(); ++i)
+  {
+    const double initial_gravity_torque =
+      std::max(
+        -torque_limits_[i],
+        std::min(
+          kdl_gravity_(i),
+          torque_limits_[i]));
+
+    command_interfaces_[i].set_value(
+      initial_gravity_torque);
+  }
+
+
+
 
   if (hold_current_position_)
   {
@@ -482,6 +519,10 @@ WamCartesianController::on_activate(
       get_node()->get_logger(),
       "Using the configured Cartesian target.");
   }
+
+  trajectory_initialized_ = false;
+  trajectory_active_ = false;
+  desired_linear_velocity_.setZero();
 
   return
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
@@ -624,8 +665,40 @@ WamCartesianController::update()
     end_effector_pose_.p.y(),
     end_effector_pose_.p.z();
 
-  position_error_ =
-    desired_position_ - current_position_;
+  // Initialize the Cartesian trajectory on the first successful update.
+  if (!trajectory_initialized_)
+  {
+    trajectory_start_position_ = current_position_;
+
+    trajectory_target_position_ =
+      trajectory_start_position_ +
+      Eigen::Vector3d(0.15, 0.0, -0.3);
+
+    desired_position_ =
+      trajectory_start_position_;
+
+    desired_linear_velocity_.setZero();
+
+    trajectory_duration_ = 5.0;
+    trajectory_start_time_ = get_node()->now();
+
+    trajectory_initialized_ = true;
+    trajectory_active_ = true;
+
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "Cartesian trajectory initialized. "
+      "Start=[%.3f, %.3f, %.3f], "
+      "Target=[%.3f, %.3f, %.3f], "
+      "Duration=%.2f seconds.",
+      trajectory_start_position_(0),
+      trajectory_start_position_(1),
+      trajectory_start_position_(2),
+      trajectory_target_position_(0),
+      trajectory_target_position_(1),
+      trajectory_target_position_(2),
+      trajectory_duration_);
+  }
 
   // ---------------------------------------------------------
   // 4. Jacobian
@@ -680,15 +753,83 @@ WamCartesianController::update()
     cartesian_velocity_[1],
     cartesian_velocity_[2];
 
+
+
+  // ---------------------------------------------------------
+  // 6. Quintic Cartesian trajectory
+  // ---------------------------------------------------------
+  if (trajectory_active_)
+  {
+    const double elapsed_time =
+      (get_node()->now() - trajectory_start_time_).seconds();
+
+    double s =
+      elapsed_time / trajectory_duration_;
+
+    s = std::max(
+      0.0,
+      std::min(s, 1.0));
+
+    const double s2 = s * s;
+    const double s3 = s2 * s;
+    const double s4 = s3 * s;
+    const double s5 = s4 * s;
+
+    const double scaling =
+      10.0 * s3
+      - 15.0 * s4
+      + 6.0 * s5;
+
+    const double scaling_velocity =
+      (
+        30.0 * s2
+        - 60.0 * s3
+        + 30.0 * s4
+      ) / trajectory_duration_;
+
+    const Eigen::Vector3d displacement =
+      trajectory_target_position_
+      - trajectory_start_position_;
+
+    desired_position_ =
+      trajectory_start_position_
+      + scaling * displacement;
+
+    desired_linear_velocity_ =
+      scaling_velocity * displacement;
+
+    if (s >= 1.0)
+    {
+      trajectory_active_ = false;
+
+      desired_position_ =
+        trajectory_target_position_;
+
+      desired_linear_velocity_.setZero();
+
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Cartesian trajectory completed.");
+    }
+  }
+
+  position_error_ =
+    desired_position_
+    - current_position_;
+
+  const Eigen::Vector3d velocity_error =
+    desired_linear_velocity_
+    - linear_velocity_;
+
   // ---------------------------------------------------------
   // 6. Cartesian PD force
   // F = Kp(x_des - x) - Kd*x_dot
   // ---------------------------------------------------------
   cartesian_force_ =
-    cartesian_kp_.cwiseProduct(position_error_) -
-    cartesian_kd_.cwiseProduct(linear_velocity_);
+    cartesian_kp_.cwiseProduct(position_error_) +
+    cartesian_kd_.cwiseProduct(velocity_error);
 
-  constexpr double max_cartesian_force = 10.0;
+  constexpr double max_cartesian_force = 5.0;
 
   for (int axis = 0; axis < 3; ++axis)
   {
