@@ -14,6 +14,8 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
+  <depend>realtime_tools</depend>
+  <depend>std_msgs</depend>
   
   <depend>orocos_kdl</depend>
   <depend>kdl_parser</depend>

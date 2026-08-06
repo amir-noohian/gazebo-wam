@@ -5,6 +5,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <functional>
 
 #include "wam_cartesian_controller/wam_cartesian_controller.hpp"
 
@@ -56,6 +57,14 @@ WamCartesianController::init(const std::string & controller_name)
   auto_declare<bool>(
     "hold_current_position",
     true);
+
+  auto_declare<double>("trajectory_velocity", 0.05);
+  auto_declare<double>("trajectory_acceleration", 0.05);
+  auto_declare<double>("nullspace_target", -0.7853981633974483);
+  auto_declare<double>("nullspace_kp", 5.0);
+  auto_declare<double>("nullspace_kd", 1.0);
+  auto_declare<double>("nullspace_damping", 0.01);
+  auto_declare<double>("nullspace_max_torque", 0.2);
 
   auto_declare<std::string>(
     "root_link",
@@ -134,6 +143,23 @@ WamCartesianController::on_configure(
   hold_current_position_ =
     get_node()->get_parameter("hold_current_position").as_bool();
 
+  trajectory_velocity_ =
+    get_node()->get_parameter("trajectory_velocity").as_double();
+
+  trajectory_acceleration_ =
+    get_node()->get_parameter("trajectory_acceleration").as_double();
+
+  nullspace_target_ =
+    get_node()->get_parameter("nullspace_target").as_double();
+  nullspace_kp_ =
+    get_node()->get_parameter("nullspace_kp").as_double();
+  nullspace_kd_ =
+    get_node()->get_parameter("nullspace_kd").as_double();
+  nullspace_damping_ =
+    get_node()->get_parameter("nullspace_damping").as_double();
+  nullspace_max_torque_ =
+    get_node()->get_parameter("nullspace_max_torque").as_double();
+
   root_link_ =
     get_node()->get_parameter("root_link").as_string();
 
@@ -151,6 +177,26 @@ WamCartesianController::on_configure(
       "q_des, kp, kd, and torque_limits must each contain %zu values.",
       number_of_joints);
 
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  if (trajectory_velocity_ <= 0.0 || trajectory_acceleration_ <= 0.0)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "trajectory_velocity and trajectory_acceleration must be positive.");
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  if (!std::isfinite(nullspace_target_) || nullspace_kp_ < 0.0 ||
+    nullspace_kd_ < 0.0 || nullspace_damping_ <= 0.0 ||
+    nullspace_max_torque_ <= 0.0)
+  {
+    RCLCPP_ERROR(get_node()->get_logger(), "One or more null-space parameters are invalid.");
     return
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
@@ -260,8 +306,11 @@ WamCartesianController::on_configure(
 
   kdl_q_.resize(kdl_joint_count);
   kdl_gravity_.resize(kdl_joint_count);
+  kdl_mass_matrix_.resize(kdl_joint_count);
 
   desired_position_.setZero();
+  nullspace_torque_.setZero();
+  mass_matrix_eigen_.setZero();
 
   cartesian_kp_ << 30.0, 30.0, 30.0;
   cartesian_kd_ << 10.0, 10.0, 10.0;
@@ -297,6 +346,15 @@ WamCartesianController::on_configure(
   kdl_jacobian_.resize(kdl_chain_.getNrOfJoints());
 
   kdl_initialized_ = true;
+
+  target_subscription_ =
+    get_node()->create_subscription<geometry_msgs::msg::PointStamped>(
+      "~/target_position",
+      rclcpp::SystemDefaultsQoS(),
+      std::bind(
+        &WamCartesianController::target_callback,
+        this,
+        std::placeholders::_1));
 
   RCLCPP_INFO(
     get_node()->get_logger(),
@@ -523,10 +581,49 @@ WamCartesianController::on_activate(
   trajectory_initialized_ = false;
   trajectory_active_ = false;
   desired_linear_velocity_.setZero();
+  {
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    target_pending_ = false;
+  }
 
   return
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
     CallbackReturn::SUCCESS;
+}
+
+void WamCartesianController::target_callback(
+  const geometry_msgs::msg::PointStamped::SharedPtr message)
+{
+  if (!message->header.frame_id.empty() && message->header.frame_id != root_link_)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Rejected Cartesian target in frame '%s'; expected '%s'.",
+      message->header.frame_id.c_str(), root_link_.c_str());
+    return;
+  }
+
+  const Eigen::Vector3d target(
+    message->point.x,
+    message->point.y,
+    message->point.z);
+
+  if (!target.allFinite())
+  {
+    RCLCPP_ERROR(get_node()->get_logger(), "Rejected non-finite Cartesian target.");
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    pending_target_position_ = target;
+    target_pending_ = true;
+  }
+
+  RCLCPP_INFO(
+    get_node()->get_logger(),
+    "Received Cartesian target [%.4f, %.4f, %.4f] in %s.",
+    target(0), target(1), target(2), root_link_.c_str());
 }
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
@@ -665,39 +762,90 @@ WamCartesianController::update()
     end_effector_pose_.p.y(),
     end_effector_pose_.p.z();
 
-  // Initialize the Cartesian trajectory on the first successful update.
+  // On activation, hold the measured end-effector position. Motion begins
+  // only after an external target is received.
   if (!trajectory_initialized_)
   {
     trajectory_start_position_ = current_position_;
-
-    trajectory_target_position_ =
-      trajectory_start_position_ +
-      Eigen::Vector3d(0.15, 0.0, -0.3);
-
-    desired_position_ =
-      trajectory_start_position_;
-
+    trajectory_target_position_ = current_position_;
+    desired_position_ = current_position_;
     desired_linear_velocity_.setZero();
-
-    trajectory_duration_ = 5.0;
-    trajectory_start_time_ = get_node()->now();
-
     trajectory_initialized_ = true;
-    trajectory_active_ = true;
+    trajectory_active_ = false;
 
     RCLCPP_INFO(
       get_node()->get_logger(),
-      "Cartesian trajectory initialized. "
-      "Start=[%.3f, %.3f, %.3f], "
-      "Target=[%.3f, %.3f, %.3f], "
-      "Duration=%.2f seconds.",
-      trajectory_start_position_(0),
-      trajectory_start_position_(1),
-      trajectory_start_position_(2),
-      trajectory_target_position_(0),
-      trajectory_target_position_(1),
-      trajectory_target_position_(2),
-      trajectory_duration_);
+      "Holding activation position [%.4f, %.4f, %.4f]; waiting for a target.",
+      current_position_(0), current_position_(1), current_position_(2));
+  }
+
+  // Copy a newly received target without blocking the real-time update loop.
+  Eigen::Vector3d new_target;
+  bool have_new_target = false;
+  if (target_mutex_.try_lock())
+  {
+    if (target_pending_)
+    {
+      new_target = pending_target_position_;
+      target_pending_ = false;
+      have_new_target = true;
+    }
+    target_mutex_.unlock();
+  }
+
+  if (have_new_target)
+  {
+    // Replanning starts from the measured position. This is intentional for
+    // manual, point-to-point commands sent after the previous move completes.
+    trajectory_start_position_ = current_position_;
+    trajectory_target_position_ = new_target;
+    trajectory_path_length_ =
+      (trajectory_target_position_ - trajectory_start_position_).norm();
+
+    if (trajectory_path_length_ < 1e-9)
+    {
+      desired_position_ = trajectory_target_position_;
+      desired_linear_velocity_.setZero();
+      trajectory_active_ = false;
+      RCLCPP_INFO(get_node()->get_logger(), "Cartesian target is already reached.");
+    }
+    else
+    {
+      const double accel_decel_distance =
+        trajectory_velocity_ * trajectory_velocity_ / trajectory_acceleration_;
+
+      if (trajectory_path_length_ <= accel_decel_distance)
+      {
+        trajectory_peak_velocity_ =
+          std::sqrt(trajectory_acceleration_ * trajectory_path_length_);
+        trajectory_accel_time_ =
+          trajectory_peak_velocity_ / trajectory_acceleration_;
+        trajectory_cruise_time_ = 0.0;
+      }
+      else
+      {
+        trajectory_peak_velocity_ = trajectory_velocity_;
+        trajectory_accel_time_ =
+          trajectory_peak_velocity_ / trajectory_acceleration_;
+        trajectory_cruise_time_ =
+          (trajectory_path_length_ - accel_decel_distance) /
+          trajectory_peak_velocity_;
+      }
+
+      trajectory_duration_ =
+        2.0 * trajectory_accel_time_ + trajectory_cruise_time_;
+      trajectory_start_time_ = get_node()->now();
+      trajectory_active_ = true;
+      desired_position_ = trajectory_start_position_;
+      desired_linear_velocity_.setZero();
+
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Started Cartesian trajectory: length=%.4f m, peak velocity=%.4f m/s, "
+        "acceleration=%.4f m/s^2, duration=%.3f s.",
+        trajectory_path_length_, trajectory_peak_velocity_,
+        trajectory_acceleration_, trajectory_duration_);
+    }
   }
 
   // ---------------------------------------------------------
@@ -756,61 +904,50 @@ WamCartesianController::update()
 
 
   // ---------------------------------------------------------
-  // 6. Quintic Cartesian trajectory
+  // 6. Trapezoidal Cartesian trajectory
   // ---------------------------------------------------------
   if (trajectory_active_)
   {
-    const double elapsed_time =
-      (get_node()->now() - trajectory_start_time_).seconds();
+    const double elapsed =
+      std::max(0.0, (get_node()->now() - trajectory_start_time_).seconds());
+    double path_position = 0.0;
+    double path_velocity = 0.0;
 
-    double s =
-      elapsed_time / trajectory_duration_;
-
-    s = std::max(
-      0.0,
-      std::min(s, 1.0));
-
-    const double s2 = s * s;
-    const double s3 = s2 * s;
-    const double s4 = s3 * s;
-    const double s5 = s4 * s;
-
-    const double scaling =
-      10.0 * s3
-      - 15.0 * s4
-      + 6.0 * s5;
-
-    const double scaling_velocity =
-      (
-        30.0 * s2
-        - 60.0 * s3
-        + 30.0 * s4
-      ) / trajectory_duration_;
-
-    const Eigen::Vector3d displacement =
-      trajectory_target_position_
-      - trajectory_start_position_;
-
-    desired_position_ =
-      trajectory_start_position_
-      + scaling * displacement;
-
-    desired_linear_velocity_ =
-      scaling_velocity * displacement;
-
-    if (s >= 1.0)
+    if (elapsed < trajectory_accel_time_)
+    {
+      path_velocity = trajectory_acceleration_ * elapsed;
+      path_position = 0.5 * trajectory_acceleration_ * elapsed * elapsed;
+    }
+    else if (elapsed < trajectory_accel_time_ + trajectory_cruise_time_)
+    {
+      const double acceleration_distance =
+        0.5 * trajectory_acceleration_ *
+        trajectory_accel_time_ * trajectory_accel_time_;
+      path_velocity = trajectory_peak_velocity_;
+      path_position = acceleration_distance +
+        trajectory_peak_velocity_ * (elapsed - trajectory_accel_time_);
+    }
+    else if (elapsed < trajectory_duration_)
+    {
+      const double remaining = trajectory_duration_ - elapsed;
+      path_velocity = trajectory_acceleration_ * remaining;
+      path_position = trajectory_path_length_ -
+        0.5 * trajectory_acceleration_ * remaining * remaining;
+    }
+    else
     {
       trajectory_active_ = false;
-
-      desired_position_ =
-        trajectory_target_position_;
-
-      desired_linear_velocity_.setZero();
-
-      RCLCPP_INFO(
-        get_node()->get_logger(),
-        "Cartesian trajectory completed.");
+      path_position = trajectory_path_length_;
+      path_velocity = 0.0;
+      RCLCPP_INFO(get_node()->get_logger(), "Cartesian trajectory completed.");
     }
+
+    const Eigen::Vector3d path_direction =
+      (trajectory_target_position_ - trajectory_start_position_) /
+      trajectory_path_length_;
+    desired_position_ =
+      trajectory_start_position_ + path_direction * path_position;
+    desired_linear_velocity_ = path_direction * path_velocity;
   }
 
   position_error_ =
@@ -871,7 +1008,120 @@ WamCartesianController::update()
   }
 
   // ---------------------------------------------------------
-  // 9. Gravity compensation
+  // 9. Dynamically consistent null-space posture control
+  // ---------------------------------------------------------
+  const int mass_result =
+    kdl_dynamics_solver_->JntToMass(kdl_q_, kdl_mass_matrix_);
+
+  if (mass_result < 0)
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "KDL failed to calculate the joint-space mass matrix. Error code: %d.",
+      mass_result);
+    for (auto & command_interface : command_interfaces_)
+    {
+      command_interface.set_value(0.0);
+    }
+    return controller_interface::return_type::ERROR;
+  }
+
+  for (std::size_t row = 0; row < joint_names_.size(); ++row)
+  {
+    for (std::size_t column = 0; column < joint_names_.size(); ++column)
+    {
+      mass_matrix_eigen_(row, column) = kdl_mass_matrix_(row, column);
+    }
+  }
+
+  const Eigen::Matrix<double, 3, 7> translational_jacobian =
+    jacobian_eigen_.topRows<3>();
+  const Eigen::LDLT<Eigen::Matrix<double, 7, 7>> mass_decomposition(
+    mass_matrix_eigen_);
+
+  if (mass_decomposition.info() != Eigen::Success)
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "Failed to factor the joint-space mass matrix.");
+    for (auto & command_interface : command_interfaces_)
+    {
+      command_interface.set_value(0.0);
+    }
+    return controller_interface::return_type::ERROR;
+  }
+
+  const Eigen::Matrix<double, 7, 3> mass_inverse_jacobian_transpose =
+    mass_decomposition.solve(translational_jacobian.transpose());
+  Eigen::Matrix3d operational_matrix =
+    translational_jacobian * mass_inverse_jacobian_transpose;
+  operational_matrix.diagonal().array() +=
+    nullspace_damping_ * nullspace_damping_;
+
+  const Eigen::LDLT<Eigen::Matrix3d> operational_decomposition(operational_matrix);
+  if (operational_decomposition.info() != Eigen::Success)
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "Failed to factor the damped Cartesian inertia matrix.");
+    for (auto & command_interface : command_interfaces_)
+    {
+      command_interface.set_value(0.0);
+    }
+    return controller_interface::return_type::ERROR;
+  }
+
+  const Eigen::Matrix<double, 7, 3> dynamically_consistent_inverse =
+    mass_inverse_jacobian_transpose *
+    operational_decomposition.solve(Eigen::Matrix3d::Identity());
+  const Eigen::Matrix<double, 7, 7> torque_nullspace_projector =
+    Eigen::Matrix<double, 7, 7>::Identity() -
+    translational_jacobian.transpose() * dynamically_consistent_inverse.transpose();
+
+  Eigen::Matrix<double, 7, 1> raw_posture_torque =
+    Eigen::Matrix<double, 7, 1>::Zero();
+  const double joint_6_error = nullspace_target_ - q_[nullspace_joint_index_];
+  const double joint_6_torque =
+    nullspace_kp_ * joint_6_error -
+    nullspace_kd_ * dq_[nullspace_joint_index_];
+  raw_posture_torque(nullspace_joint_index_) =
+    std::max(
+      -nullspace_max_torque_,
+      std::min(joint_6_torque, nullspace_max_torque_));
+  nullspace_torque_ = torque_nullspace_projector * raw_posture_torque;
+
+  // A dynamically consistent torque projector is not norm preserving and can
+  // strongly amplify a small raw posture torque near poorly conditioned
+  // configurations. Scale the complete projected vector so the secondary task
+  // can never exceed its configured torque-vector magnitude.
+  const double projected_torque_norm = nullspace_torque_.norm();
+  if (projected_torque_norm > nullspace_max_torque_)
+  {
+    nullspace_torque_ *= nullspace_max_torque_ / projected_torque_norm;
+  }
+
+  if (!nullspace_torque_.allFinite())
+  {
+    RCLCPP_ERROR_THROTTLE(
+      get_node()->get_logger(),
+      *get_node()->get_clock(),
+      2000,
+      "Null-space torque contains invalid values.");
+    for (auto & command_interface : command_interfaces_)
+    {
+      command_interface.set_value(0.0);
+    }
+    return controller_interface::return_type::ERROR;
+  }
+
+  // ---------------------------------------------------------
+  // 10. Gravity compensation
   // ---------------------------------------------------------
   const int gravity_result =
     kdl_dynamics_solver_->JntToGravity(
@@ -896,13 +1146,13 @@ WamCartesianController::update()
   }
 
   // ---------------------------------------------------------
-  // 10. Apply the complete Cartesian controller
-  // tau = g(q) + J^T W
+  // 11. Apply the complete Cartesian controller
+  // tau = g(q) + J^T W + N^T*tau_posture
   // ---------------------------------------------------------
   for (std::size_t i = 0; i < joint_names_.size(); ++i)
   {
     const double commanded_torque =
-      kdl_gravity_(i) + cartesian_torque_(i);
+      kdl_gravity_(i) + cartesian_torque_(i) + nullspace_torque_(i);
 
     const double limited_torque =
       std::max(
@@ -982,6 +1232,18 @@ WamCartesianController::update()
     cartesian_torque_(4),
     cartesian_torque_(5),
     cartesian_torque_(6));
+
+  RCLCPP_INFO_THROTTLE(
+    get_node()->get_logger(),
+    *get_node()->get_clock(),
+    1000,
+    "Null space | joint_6=%.4f rad, target=%.4f rad, error=%.4f rad, "
+    "raw torque=%.3f Nm, projected joint_6 torque=%.3f Nm",
+    q_[nullspace_joint_index_],
+    nullspace_target_,
+    joint_6_error,
+    raw_posture_torque(nullspace_joint_index_),
+    nullspace_torque_(nullspace_joint_index_));
 
   std::ostringstream log_stream;
   log_stream << std::fixed << std::setprecision(6);

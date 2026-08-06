@@ -38,13 +38,18 @@ wam_model_controller:
     tip_link: "wam/wrist_palm_link"
     hold_current_position: false
 
+    # Straight joint-space path, parameterized by a trapezoidal velocity
+    # profile. These are limits on speed along the complete 7-D path.
+    trajectory_velocity: 0.3
+    trajectory_acceleration: 0.3
+
     q_des:
       - 0.0
-      - 0.2
+      - 0.7853981633974483
       - 0.0
+      - 1.5707963267948966
       - 0.0
-      - 0.0
-      - 0.0
+      - -0.7853981633974483
       - 0.0
 
     kp:
@@ -66,20 +71,31 @@ wam_model_controller:
       - 0.1
 
     torque_limits:
-      - 20.0
-      - 20.0
-      - 20.0
-      - 20.0
+      - 60.0
+      - 60.0
+      - 45.0
+      - 30.0
       - 10.0
       - 10.0
-      - 5.0
+      - 10.0
 
 wam_cartesian_controller:
   ros__parameters:
     root_link: "wam/base_link"
-    tip_link: "wam/wrist_palm_link"
+    # Tool-center point: 6 cm along the palm link's local +Z axis.
+    tip_link: "wam/wrist_palm_stump_link"
 
     hold_current_position: true
+
+    trajectory_velocity: 0.05
+    trajectory_acceleration: 0.05
+
+    # Secondary task: keep WAM joint 6 (wrist pitch) near -45 degrees.
+    nullspace_target: -0.7853981633974483
+    nullspace_kp: 5.0
+    nullspace_kd: 1.0
+    nullspace_damping: 0.01
+    nullspace_max_torque: 0.2
 
     q_des:
       - 0.0

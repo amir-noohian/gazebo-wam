@@ -13,6 +13,8 @@
 
 #include "controller_interface/controller_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "realtime_tools/realtime_publisher.h"
+#include "std_msgs/msg/bool.hpp"
 
 namespace wam_model_controller
 {
@@ -52,6 +54,10 @@ private:
   std::vector<double> q_;
   std::vector<double> dq_;
   std::vector<double> q_des_;
+  std::vector<double> trajectory_start_;
+  std::vector<double> trajectory_target_;
+  std::vector<double> trajectory_direction_;
+  std::vector<double> dq_des_;
 
   std::vector<double> kp_;
   std::vector<double> kd_;
@@ -59,6 +65,20 @@ private:
   std::vector<double> torque_limits_;
 
   bool hold_current_position_;
+
+  // Straight joint-space path with a trapezoidal scalar velocity profile.
+  double trajectory_velocity_{0.3};
+  double trajectory_acceleration_{0.3};
+  double trajectory_path_length_{0.0};
+  double trajectory_peak_velocity_{0.0};
+  double trajectory_accel_time_{0.0};
+  double trajectory_cruise_time_{0.0};
+  double trajectory_duration_{0.0};
+  rclcpp::Time trajectory_start_time_;
+  bool trajectory_active_{false};
+  bool completion_pending_{false};
+  std::shared_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Bool>>
+    completion_publisher_;
 
   // KDL robot model
   KDL::Tree kdl_tree_;

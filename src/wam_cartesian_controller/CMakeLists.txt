@@ -11,6 +11,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(controller_interface REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(orocos_kdl REQUIRED)
@@ -34,6 +35,7 @@ target_include_directories(
 ament_target_dependencies(
   wam_cartesian_controller
   controller_interface
+  geometry_msgs
   hardware_interface
   pluginlib
   rclcpp
@@ -65,6 +67,7 @@ ament_export_include_directories(include)
 
 ament_export_dependencies(
   controller_interface
+  geometry_msgs
   hardware_interface
   kdl_parser
   orocos_kdl

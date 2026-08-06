@@ -22,6 +22,22 @@ find_package(robot_state_publisher REQUIRED)
 find_package(gazebo_ros REQUIRED)
 find_package(gazebo_ros2_control REQUIRED)
 find_package(controller_manager REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+
+add_executable(controller_switcher src/controller_switcher.cpp)
+ament_target_dependencies(
+  controller_switcher
+  controller_manager_msgs
+  rclcpp
+  std_msgs
+)
+
+install(
+  TARGETS controller_switcher
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

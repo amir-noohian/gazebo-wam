@@ -82,6 +82,13 @@ def generate_launch_description():
         ]
     )
 
+    controller_switcher = Node(
+        package="wam_gazebo",
+        executable="controller_switcher",
+        name="wam_controller_switcher",
+        output="screen",
+    )
+
     # ---------------------------------------------------------
     # Spawn the WAM in Gazebo
     # ---------------------------------------------------------
@@ -105,8 +112,8 @@ def generate_launch_description():
     )
 
     # ---------------------------------------------------------
-    # Wait until controller_manager actually responds,
-    # then start both controllers
+    # Load both arm controllers, then start joint-space control while Cartesian
+    # control remains inactive for a later explicit switch.
     # ---------------------------------------------------------
     start_controllers = ExecuteProcess(
         cmd=[
@@ -132,19 +139,19 @@ def generate_launch_description():
                 "--controller-manager /controller_manager "
                 "--stopped; "
 
+                "echo 'Loading joint-space model controller'; "
+
+                "ros2 run controller_manager spawner.py "
+                "wam_model_controller "
+                "--controller-manager /controller_manager "
+                "--stopped; "
+
                 "echo 'Loading Cartesian controller'; "
 
                 "ros2 run controller_manager spawner.py "
                 "wam_cartesian_controller "
                 "--controller-manager /controller_manager "
                 "--stopped; "
-
-                "echo 'Unpausing Gazebo'; "
-
-                "ros2 service call "
-                "/unpause_physics "
-                "std_srvs/srv/Empty "
-                "'{}' >/dev/null; "
 
                 "echo 'Activating controllers'; "
 
@@ -153,12 +160,22 @@ def generate_launch_description():
                 "controller_manager_msgs/srv/SwitchController "
                 "\"{"
                 "start_controllers: "
-                "[joint_state_broadcaster, wam_cartesian_controller], "
+                "[joint_state_broadcaster, wam_model_controller], "
                 "stop_controllers: [], "
                 "strictness: 2, "
                 "start_asap: true, "
                 "timeout: {sec: 0, nanosec: 0}"
-                "}\"; "
+                "}\" & "
+                "switch_pid=$!; "
+
+                "echo 'Unpausing Gazebo'; "
+
+                "ros2 service call "
+                "/unpause_physics "
+                "std_srvs/srv/Empty "
+                "'{}' >/dev/null; "
+
+                "wait ${switch_pid}; "
 
                 "echo 'Controller states:'; "
 
@@ -183,6 +200,7 @@ def generate_launch_description():
         gui_arg,
         gazebo,
         robot_state_publisher,
+        controller_switcher,
         spawn_wam,
         start_controllers_after_spawn,
     ])

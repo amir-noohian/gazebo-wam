@@ -57,6 +57,9 @@ WamModelController::init(const std::string & controller_name)
     "hold_current_position",
     true);
 
+  auto_declare<double>("trajectory_velocity", 0.3);
+  auto_declare<double>("trajectory_acceleration", 0.3);
+
   auto_declare<std::string>(
     "root_link",
     "wam/base_link");
@@ -134,6 +137,12 @@ WamModelController::on_configure(
   hold_current_position_ =
     get_node()->get_parameter("hold_current_position").as_bool();
 
+  trajectory_velocity_ =
+    get_node()->get_parameter("trajectory_velocity").as_double();
+
+  trajectory_acceleration_ =
+    get_node()->get_parameter("trajectory_acceleration").as_double();
+
   root_link_ =
     get_node()->get_parameter("root_link").as_string();
 
@@ -151,6 +160,16 @@ WamModelController::on_configure(
       "q_des, kp, kd, and torque_limits must each contain %zu values.",
       number_of_joints);
 
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+
+  if (trajectory_velocity_ <= 0.0 || trajectory_acceleration_ <= 0.0)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "trajectory_velocity and trajectory_acceleration must be positive.");
     return
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
@@ -279,6 +298,13 @@ WamModelController::on_configure(
 
   kdl_initialized_ = true;
 
+  auto completion_publisher =
+    get_node()->create_publisher<std_msgs::msg::Bool>(
+      "~/trajectory_complete", rclcpp::SystemDefaultsQoS());
+  completion_publisher_ =
+    std::make_shared<realtime_tools::RealtimePublisher<std_msgs::msg::Bool>>(
+      completion_publisher);
+
   RCLCPP_INFO(
     get_node()->get_logger(),
     "KDL initialized: %s -> %s, %zu joints, %u segments.",
@@ -341,6 +367,12 @@ WamModelController::on_activate(
       CallbackReturn::ERROR;
   }
 
+  trajectory_start_.resize(joint_names_.size());
+  trajectory_target_ = q_des_;
+  trajectory_direction_.assign(joint_names_.size(), 0.0);
+  dq_des_.assign(joint_names_.size(), 0.0);
+  trajectory_path_length_ = 0.0;
+
   for (std::size_t i = 0; i < joint_names_.size(); ++i)
   {
     q_[i] =
@@ -349,12 +381,67 @@ WamModelController::on_activate(
     dq_[i] =
       state_interfaces_[2 * i + 1].get_value();
 
-    if (hold_current_position_)
-    {
-      q_des_[i] = q_[i];
-    }
+    trajectory_start_[i] = q_[i];
+    const double displacement = trajectory_target_[i] - trajectory_start_[i];
+    trajectory_path_length_ += displacement * displacement;
 
     command_interfaces_[i].set_value(0.0);
+  }
+
+  trajectory_path_length_ = std::sqrt(trajectory_path_length_);
+  trajectory_active_ = false;
+  completion_pending_ = false;
+
+  if (hold_current_position_ || trajectory_path_length_ < 1e-9)
+  {
+    q_des_ = trajectory_start_;
+  }
+  else
+  {
+    for (std::size_t i = 0; i < joint_names_.size(); ++i)
+    {
+      trajectory_direction_[i] =
+        (trajectory_target_[i] - trajectory_start_[i]) / trajectory_path_length_;
+    }
+
+    // If the path is too short to reach the requested velocity, the profile
+    // is triangular and its peak velocity is sqrt(acceleration * length).
+    const double distance_to_accelerate_and_decelerate =
+      trajectory_velocity_ * trajectory_velocity_ / trajectory_acceleration_;
+
+    if (trajectory_path_length_ <= distance_to_accelerate_and_decelerate)
+    {
+      trajectory_peak_velocity_ =
+        std::sqrt(trajectory_acceleration_ * trajectory_path_length_);
+      trajectory_accel_time_ =
+        trajectory_peak_velocity_ / trajectory_acceleration_;
+      trajectory_cruise_time_ = 0.0;
+    }
+    else
+    {
+      trajectory_peak_velocity_ = trajectory_velocity_;
+      trajectory_accel_time_ =
+        trajectory_peak_velocity_ / trajectory_acceleration_;
+      const double acceleration_distance =
+        trajectory_peak_velocity_ * trajectory_peak_velocity_ /
+        trajectory_acceleration_;
+      trajectory_cruise_time_ =
+        (trajectory_path_length_ - acceleration_distance) /
+        trajectory_peak_velocity_;
+    }
+
+    trajectory_duration_ =
+      2.0 * trajectory_accel_time_ + trajectory_cruise_time_;
+    trajectory_start_time_ = get_node()->now();
+    trajectory_active_ = true;
+    q_des_ = trajectory_start_;
+
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "Started joint trajectory: length=%.3f rad, peak velocity=%.3f rad/s, "
+      "acceleration=%.3f rad/s^2, duration=%.3f s.",
+      trajectory_path_length_, trajectory_peak_velocity_,
+      trajectory_acceleration_, trajectory_duration_);
   }
 
   if (hold_current_position_)
@@ -363,7 +450,7 @@ WamModelController::on_activate(
       get_node()->get_logger(),
       "Captured the current joint configuration as q_des.");
   }
-  else
+  else if (!trajectory_active_)
   {
     RCLCPP_INFO(
       get_node()->get_logger(),
@@ -416,6 +503,62 @@ WamModelController::update()
       "KDL dynamics solver is not initialized.");
 
     return controller_interface::return_type::ERROR;
+  }
+
+  // Evaluate the scalar trapezoidal profile. Its output is path distance and
+  // path velocity; the unit path direction maps both values to every joint.
+  if (trajectory_active_)
+  {
+    const double elapsed =
+      std::max(0.0, (get_node()->now() - trajectory_start_time_).seconds());
+    double path_position = 0.0;
+    double path_velocity = 0.0;
+
+    if (elapsed < trajectory_accel_time_)
+    {
+      path_velocity = trajectory_acceleration_ * elapsed;
+      path_position = 0.5 * trajectory_acceleration_ * elapsed * elapsed;
+    }
+    else if (elapsed < trajectory_accel_time_ + trajectory_cruise_time_)
+    {
+      const double acceleration_distance =
+        0.5 * trajectory_acceleration_ *
+        trajectory_accel_time_ * trajectory_accel_time_;
+      const double cruise_elapsed = elapsed - trajectory_accel_time_;
+      path_velocity = trajectory_peak_velocity_;
+      path_position =
+        acceleration_distance + trajectory_peak_velocity_ * cruise_elapsed;
+    }
+    else if (elapsed < trajectory_duration_)
+    {
+      const double remaining = trajectory_duration_ - elapsed;
+      path_velocity = trajectory_acceleration_ * remaining;
+      path_position =
+        trajectory_path_length_ -
+        0.5 * trajectory_acceleration_ * remaining * remaining;
+    }
+    else
+    {
+      path_position = trajectory_path_length_;
+      path_velocity = 0.0;
+      trajectory_active_ = false;
+      completion_pending_ = true;
+      RCLCPP_INFO(get_node()->get_logger(), "Joint trajectory completed.");
+    }
+
+    for (std::size_t i = 0; i < joint_names_.size(); ++i)
+    {
+      q_des_[i] =
+        trajectory_start_[i] + trajectory_direction_[i] * path_position;
+      dq_des_[i] = trajectory_direction_[i] * path_velocity;
+    }
+  }
+
+  if (completion_pending_ && completion_publisher_ && completion_publisher_->trylock())
+  {
+    completion_publisher_->msg_.data = true;
+    completion_publisher_->unlockAndPublish();
+    completion_pending_ = false;
   }
 
   /*
@@ -482,7 +625,7 @@ WamModelController::update()
   /*
    * Gravity compensation plus joint-space PD:
    *
-   * tau = g(q) + Kp(q_des - q) - Kd*dq
+   * tau = g(q) + Kp(q_des - q) + Kd(dq_des - dq)
    */
   for (std::size_t i = 0; i < joint_names_.size(); ++i)
   {
@@ -493,8 +636,8 @@ WamModelController::update()
       kdl_gravity_(i);
 
     const double pd_torque =
-      kp_[i] * position_error -
-      kd_[i] * dq_[i];
+      kp_[i] * position_error +
+      kd_[i] * (dq_des_[i] - dq_[i]);
 
     const double raw_torque =
       gravity_torque + pd_torque;
@@ -533,8 +676,8 @@ WamModelController::update()
       q_des_[i] - q_[i];
 
     const double pd_torque =
-      kp_[i] * position_error -
-      kd_[i] * dq_[i];
+      kp_[i] * position_error +
+      kd_[i] * (dq_des_[i] - dq_[i]);
 
     const double commanded_torque =
       command_interfaces_[i].get_value();

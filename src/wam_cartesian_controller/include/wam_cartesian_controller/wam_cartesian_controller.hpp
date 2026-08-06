@@ -3,14 +3,18 @@
 
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <array>
 #include <Eigen/Dense>
 
+#include <geometry_msgs/msg/point_stamped.hpp>
+
 #include <kdl/chain.hpp>
 #include <kdl/chaindynparam.hpp>
 #include <kdl/jntarray.hpp>
+#include <kdl/jntspaceinertiamatrix.hpp>
 #include <kdl/tree.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/frames.hpp>
@@ -53,6 +57,8 @@ public:
   controller_interface::return_type update() override;
 
 private:
+  void target_callback(const geometry_msgs::msg::PointStamped::SharedPtr message);
+
   std::vector<std::string> joint_names_;
 
   std::vector<double> q_;
@@ -76,6 +82,7 @@ private:
 
   KDL::JntArray kdl_q_;
   KDL::JntArray kdl_gravity_;
+  KDL::JntSpaceInertiaMatrix kdl_mass_matrix_;
 
   KDL::Frame end_effector_pose_;
   KDL::Jacobian kdl_jacobian_;
@@ -92,6 +99,8 @@ private:
   Eigen::Matrix<double, 6, 1> cartesian_wrench_;
   Eigen::Matrix<double, 6, 7> jacobian_eigen_;
   Eigen::Matrix<double, 7, 1> cartesian_torque_;
+  Eigen::Matrix<double, 7, 1> nullspace_torque_;
+  Eigen::Matrix<double, 7, 7> mass_matrix_eigen_;
 
   std::vector<std::size_t> position_state_indices_;
   std::vector<std::size_t> velocity_state_indices_;
@@ -109,9 +118,28 @@ private:
   Eigen::Vector3d trajectory_target_position_;
   Eigen::Vector3d desired_linear_velocity_;
 
+  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr target_subscription_;
+  std::mutex target_mutex_;
+  Eigen::Vector3d pending_target_position_;
+  bool target_pending_{false};
+
+  // Secondary posture task for WAM joint 6 (zero-based index 5).
+  static constexpr std::size_t nullspace_joint_index_ = 5;
+  double nullspace_target_{-0.7853981633974483};
+  double nullspace_kp_{5.0};
+  double nullspace_kd_{1.0};
+  double nullspace_damping_{0.01};
+  double nullspace_max_torque_{0.2};
+
   rclcpp::Time trajectory_start_time_;
 
-  double trajectory_duration_{5.0};
+  double trajectory_velocity_{0.05};
+  double trajectory_acceleration_{0.05};
+  double trajectory_path_length_{0.0};
+  double trajectory_peak_velocity_{0.0};
+  double trajectory_accel_time_{0.0};
+  double trajectory_cruise_time_{0.0};
+  double trajectory_duration_{0.0};
 
   bool trajectory_initialized_{false};
   bool trajectory_active_{false};
