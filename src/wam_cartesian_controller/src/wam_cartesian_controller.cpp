@@ -39,16 +39,12 @@ WamCartesianController::init(const std::string & controller_name)
   };
 
   auto_declare<std::vector<double>>(
-    "q_des",
-    std::vector<double>(joint_names_.size(), 0.0));
+    "cartesian_kp",
+    {30.0, 30.0, 30.0});
 
   auto_declare<std::vector<double>>(
-    "kp",
-    {50.0, 80.0, 50.0, 40.0, 10.0, 10.0, 0.2});
-
-  auto_declare<std::vector<double>>(
-    "kd",
-    {5.0, 8.0, 5.0, 4.0, 1.0, 1.0, 0.01});
+    "cartesian_kd",
+    {10.0, 10.0, 10.0});
 
   auto_declare<std::vector<double>>(
     "torque_limits",
@@ -60,7 +56,11 @@ WamCartesianController::init(const std::string & controller_name)
 
   auto_declare<double>("trajectory_velocity", 0.05);
   auto_declare<double>("trajectory_acceleration", 0.05);
+  auto_declare<std::string>("nullspace_mode", "fixed");
+  auto_declare<int>("nullspace_joint", 6);
   auto_declare<double>("nullspace_target", -0.7853981633974483);
+  auto_declare<double>("nullspace_sine_amplitude", 0.2);
+  auto_declare<double>("nullspace_sine_frequency", 0.1);
   auto_declare<double>("nullspace_kp", 5.0);
   auto_declare<double>("nullspace_kd", 1.0);
   auto_declare<double>("nullspace_damping", 0.01);
@@ -128,14 +128,11 @@ WamCartesianController::on_configure(
   q_.assign(number_of_joints, 0.0);
   dq_.assign(number_of_joints, 0.0);
 
-  q_des_ =
-    get_node()->get_parameter("q_des").as_double_array();
+  const auto cartesian_kp =
+    get_node()->get_parameter("cartesian_kp").as_double_array();
 
-  kp_ =
-    get_node()->get_parameter("kp").as_double_array();
-
-  kd_ =
-    get_node()->get_parameter("kd").as_double_array();
+  const auto cartesian_kd =
+    get_node()->get_parameter("cartesian_kd").as_double_array();
 
   torque_limits_ =
     get_node()->get_parameter("torque_limits").as_double_array();
@@ -149,8 +146,16 @@ WamCartesianController::on_configure(
   trajectory_acceleration_ =
     get_node()->get_parameter("trajectory_acceleration").as_double();
 
+  nullspace_mode_ =
+    get_node()->get_parameter("nullspace_mode").as_string();
+  const auto nullspace_joint =
+    get_node()->get_parameter("nullspace_joint").as_int();
   nullspace_target_ =
     get_node()->get_parameter("nullspace_target").as_double();
+  nullspace_sine_amplitude_ =
+    get_node()->get_parameter("nullspace_sine_amplitude").as_double();
+  nullspace_sine_frequency_ =
+    get_node()->get_parameter("nullspace_sine_frequency").as_double();
   nullspace_kp_ =
     get_node()->get_parameter("nullspace_kp").as_double();
   nullspace_kd_ =
@@ -167,19 +172,36 @@ WamCartesianController::on_configure(
     get_node()->get_parameter("tip_link").as_string();
 
   if (
-    q_des_.size() != number_of_joints ||
-    kp_.size() != number_of_joints ||
-    kd_.size() != number_of_joints ||
+    cartesian_kp.size() != 3 ||
+    cartesian_kd.size() != 3 ||
     torque_limits_.size() != number_of_joints)
   {
     RCLCPP_ERROR(
       get_node()->get_logger(),
-      "q_des, kp, kd, and torque_limits must each contain %zu values.",
+      "cartesian_kp and cartesian_kd must contain 3 values; "
+      "torque_limits must contain %zu values.",
       number_of_joints);
 
     return
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
+  }
+
+  for (Eigen::Index axis = 0; axis < 3; ++axis)
+  {
+    if (!std::isfinite(cartesian_kp[axis]) || cartesian_kp[axis] < 0.0 ||
+      !std::isfinite(cartesian_kd[axis]) || cartesian_kd[axis] < 0.0)
+    {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "Cartesian gains must be finite and non-negative.");
+      return
+        rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+        CallbackReturn::ERROR;
+    }
+
+    cartesian_kp_(axis) = cartesian_kp[axis];
+    cartesian_kd_(axis) = cartesian_kd[axis];
   }
 
   if (trajectory_velocity_ <= 0.0 || trajectory_acceleration_ <= 0.0)
@@ -192,7 +214,12 @@ WamCartesianController::on_configure(
       CallbackReturn::ERROR;
   }
 
-  if (!std::isfinite(nullspace_target_) || nullspace_kp_ < 0.0 ||
+  if ((nullspace_mode_ != "fixed" && nullspace_mode_ != "sine") ||
+    nullspace_joint < 1 || nullspace_joint > static_cast<int64_t>(number_of_joints) ||
+    !std::isfinite(nullspace_target_) ||
+    !std::isfinite(nullspace_sine_amplitude_) || nullspace_sine_amplitude_ < 0.0 ||
+    !std::isfinite(nullspace_sine_frequency_) || nullspace_sine_frequency_ <= 0.0 ||
+    nullspace_kp_ < 0.0 ||
     nullspace_kd_ < 0.0 || nullspace_damping_ <= 0.0 ||
     nullspace_max_torque_ <= 0.0)
   {
@@ -201,6 +228,7 @@ WamCartesianController::on_configure(
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
   }
+  nullspace_joint_index_ = static_cast<std::size_t>(nullspace_joint - 1);
 
   /*
    * The controller node is already managed by the controller manager's
@@ -306,15 +334,9 @@ WamCartesianController::on_configure(
 
   kdl_q_.resize(kdl_joint_count);
   kdl_gravity_.resize(kdl_joint_count);
-  kdl_mass_matrix_.resize(kdl_joint_count);
 
   desired_position_.setZero();
   nullspace_torque_.setZero();
-  mass_matrix_eigen_.setZero();
-
-  cartesian_kp_ << 30.0, 30.0, 30.0;
-  cartesian_kd_ << 10.0, 10.0, 10.0;
-
 
   desired_linear_velocity_.setZero();
   trajectory_start_position_.setZero();
@@ -525,13 +547,11 @@ WamCartesianController::on_activate(
 
     kdl_q_(i) = q_[i];
 
-    if (hold_current_position_)
-    {
-      q_des_[i] = q_[i];
-    }
-
     // command_interfaces_[i].set_value(0.0);
   }
+
+  nullspace_sine_center_ = q_[nullspace_joint_index_];
+  nullspace_start_time_ = get_node()->now();
 
   const int gravity_result =
     kdl_dynamics_solver_->JntToGravity(
@@ -569,7 +589,7 @@ WamCartesianController::on_activate(
   {
     RCLCPP_INFO(
       get_node()->get_logger(),
-      "Captured the current joint configuration as q_des.");
+      "The Cartesian target will be initialized from the current end-effector position.");
   }
   else
   {
@@ -642,7 +662,6 @@ WamCartesianController::on_deactivate(
       dq_[i] =
         state_interfaces_[velocity_state_indices_[i]].get_value();
 
-      q_des_[i] = q_[i];
     }
   }
 
@@ -1008,68 +1027,24 @@ WamCartesianController::update()
   }
 
   // ---------------------------------------------------------
-  // 9. Dynamically consistent null-space posture control
+  // 9. Damped Moore-Penrose null-space posture control
   // ---------------------------------------------------------
-  const int mass_result =
-    kdl_dynamics_solver_->JntToMass(kdl_q_, kdl_mass_matrix_);
-
-  if (mass_result < 0)
-  {
-    RCLCPP_ERROR_THROTTLE(
-      get_node()->get_logger(),
-      *get_node()->get_clock(),
-      2000,
-      "KDL failed to calculate the joint-space mass matrix. Error code: %d.",
-      mass_result);
-    for (auto & command_interface : command_interfaces_)
-    {
-      command_interface.set_value(0.0);
-    }
-    return controller_interface::return_type::ERROR;
-  }
-
-  for (std::size_t row = 0; row < joint_names_.size(); ++row)
-  {
-    for (std::size_t column = 0; column < joint_names_.size(); ++column)
-    {
-      mass_matrix_eigen_(row, column) = kdl_mass_matrix_(row, column);
-    }
-  }
-
   const Eigen::Matrix<double, 3, 7> translational_jacobian =
     jacobian_eigen_.topRows<3>();
-  const Eigen::LDLT<Eigen::Matrix<double, 7, 7>> mass_decomposition(
-    mass_matrix_eigen_);
-
-  if (mass_decomposition.info() != Eigen::Success)
-  {
-    RCLCPP_ERROR_THROTTLE(
-      get_node()->get_logger(),
-      *get_node()->get_clock(),
-      2000,
-      "Failed to factor the joint-space mass matrix.");
-    for (auto & command_interface : command_interfaces_)
-    {
-      command_interface.set_value(0.0);
-    }
-    return controller_interface::return_type::ERROR;
-  }
-
-  const Eigen::Matrix<double, 7, 3> mass_inverse_jacobian_transpose =
-    mass_decomposition.solve(translational_jacobian.transpose());
-  Eigen::Matrix3d operational_matrix =
-    translational_jacobian * mass_inverse_jacobian_transpose;
-  operational_matrix.diagonal().array() +=
+  Eigen::Matrix3d damped_jacobian_product =
+    translational_jacobian * translational_jacobian.transpose();
+  damped_jacobian_product.diagonal().array() +=
     nullspace_damping_ * nullspace_damping_;
 
-  const Eigen::LDLT<Eigen::Matrix3d> operational_decomposition(operational_matrix);
-  if (operational_decomposition.info() != Eigen::Success)
+  const Eigen::LDLT<Eigen::Matrix3d> jacobian_decomposition(
+    damped_jacobian_product);
+  if (jacobian_decomposition.info() != Eigen::Success)
   {
     RCLCPP_ERROR_THROTTLE(
       get_node()->get_logger(),
       *get_node()->get_clock(),
       2000,
-      "Failed to factor the damped Cartesian inertia matrix.");
+      "Failed to factor the damped Jacobian product.");
     for (auto & command_interface : command_interfaces_)
     {
       command_interface.set_value(0.0);
@@ -1077,29 +1052,41 @@ WamCartesianController::update()
     return controller_interface::return_type::ERROR;
   }
 
-  const Eigen::Matrix<double, 7, 3> dynamically_consistent_inverse =
-    mass_inverse_jacobian_transpose *
-    operational_decomposition.solve(Eigen::Matrix3d::Identity());
+  const Eigen::Matrix<double, 7, 3> damped_pseudoinverse =
+    translational_jacobian.transpose() *
+    jacobian_decomposition.solve(Eigen::Matrix3d::Identity());
   const Eigen::Matrix<double, 7, 7> torque_nullspace_projector =
     Eigen::Matrix<double, 7, 7>::Identity() -
-    translational_jacobian.transpose() * dynamically_consistent_inverse.transpose();
+    translational_jacobian.transpose() * damped_pseudoinverse.transpose();
 
   Eigen::Matrix<double, 7, 1> raw_posture_torque =
     Eigen::Matrix<double, 7, 1>::Zero();
-  const double joint_6_error = nullspace_target_ - q_[nullspace_joint_index_];
-  const double joint_6_torque =
-    nullspace_kp_ * joint_6_error -
-    nullspace_kd_ * dq_[nullspace_joint_index_];
+  double posture_target = nullspace_target_;
+  double posture_velocity_target = 0.0;
+  if (nullspace_mode_ == "sine")
+  {
+    constexpr double two_pi = 6.28318530717958647692;
+    const double elapsed =
+      std::max(0.0, (get_node()->now() - nullspace_start_time_).seconds());
+    const double angular_frequency = two_pi * nullspace_sine_frequency_;
+    posture_target = nullspace_sine_center_ +
+      nullspace_sine_amplitude_ * std::sin(angular_frequency * elapsed);
+    posture_velocity_target = nullspace_sine_amplitude_ * angular_frequency *
+      std::cos(angular_frequency * elapsed);
+  }
+
+  const double posture_error = posture_target - q_[nullspace_joint_index_];
+  const double posture_torque =
+    nullspace_kp_ * posture_error +
+    nullspace_kd_ * (posture_velocity_target - dq_[nullspace_joint_index_]);
   raw_posture_torque(nullspace_joint_index_) =
     std::max(
       -nullspace_max_torque_,
-      std::min(joint_6_torque, nullspace_max_torque_));
+      std::min(posture_torque, nullspace_max_torque_));
   nullspace_torque_ = torque_nullspace_projector * raw_posture_torque;
 
-  // A dynamically consistent torque projector is not norm preserving and can
-  // strongly amplify a small raw posture torque near poorly conditioned
-  // configurations. Scale the complete projected vector so the secondary task
-  // can never exceed its configured torque-vector magnitude.
+  // Scale the complete projected vector so the secondary task cannot exceed
+  // its configured torque-vector magnitude.
   const double projected_torque_norm = nullspace_torque_.norm();
   if (projected_torque_norm > nullspace_max_torque_)
   {
@@ -1237,11 +1224,12 @@ WamCartesianController::update()
     get_node()->get_logger(),
     *get_node()->get_clock(),
     1000,
-    "Null space | joint_6=%.4f rad, target=%.4f rad, error=%.4f rad, "
-    "raw torque=%.3f Nm, projected joint_6 torque=%.3f Nm",
+    "Null space | joint_%zu=%.4f rad, target=%.4f rad, error=%.4f rad, "
+    "raw torque=%.3f Nm, projected joint torque=%.3f Nm",
+    nullspace_joint_index_ + 1,
     q_[nullspace_joint_index_],
-    nullspace_target_,
-    joint_6_error,
+    posture_target,
+    posture_error,
     raw_posture_torque(nullspace_joint_index_),
     nullspace_torque_(nullspace_joint_index_));
 

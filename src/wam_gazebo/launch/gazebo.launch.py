@@ -153,6 +153,13 @@ def generate_launch_description():
                 "--controller-manager /controller_manager "
                 "--stopped; "
 
+                "echo 'Loading null-space sinusoid controller'; "
+
+                "ros2 run controller_manager spawner.py "
+                "wam_nullspace_controller "
+                "--controller-manager /controller_manager "
+                "--stopped; "
+
                 "echo 'Activating controllers'; "
 
                 "ros2 service call "

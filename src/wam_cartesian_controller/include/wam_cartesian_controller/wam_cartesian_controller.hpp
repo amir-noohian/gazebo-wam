@@ -14,7 +14,6 @@
 #include <kdl/chain.hpp>
 #include <kdl/chaindynparam.hpp>
 #include <kdl/jntarray.hpp>
-#include <kdl/jntspaceinertiamatrix.hpp>
 #include <kdl/tree.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/frames.hpp>
@@ -63,10 +62,6 @@ private:
 
   std::vector<double> q_;
   std::vector<double> dq_;
-  std::vector<double> q_des_;
-
-  std::vector<double> kp_;
-  std::vector<double> kd_;
 
   std::vector<double> torque_limits_;
 
@@ -82,7 +77,6 @@ private:
 
   KDL::JntArray kdl_q_;
   KDL::JntArray kdl_gravity_;
-  KDL::JntSpaceInertiaMatrix kdl_mass_matrix_;
 
   KDL::Frame end_effector_pose_;
   KDL::Jacobian kdl_jacobian_;
@@ -100,7 +94,6 @@ private:
   Eigen::Matrix<double, 6, 7> jacobian_eigen_;
   Eigen::Matrix<double, 7, 1> cartesian_torque_;
   Eigen::Matrix<double, 7, 1> nullspace_torque_;
-  Eigen::Matrix<double, 7, 7> mass_matrix_eigen_;
 
   std::vector<std::size_t> position_state_indices_;
   std::vector<std::size_t> velocity_state_indices_;
@@ -123,13 +116,18 @@ private:
   Eigen::Vector3d pending_target_position_;
   bool target_pending_{false};
 
-  // Secondary posture task for WAM joint 6 (zero-based index 5).
-  static constexpr std::size_t nullspace_joint_index_ = 5;
+  // Secondary posture task. The joint index is zero based internally.
+  std::string nullspace_mode_{"fixed"};
+  std::size_t nullspace_joint_index_{5};
   double nullspace_target_{-0.7853981633974483};
+  double nullspace_sine_amplitude_{0.2};
+  double nullspace_sine_frequency_{0.1};
+  double nullspace_sine_center_{0.0};
   double nullspace_kp_{5.0};
   double nullspace_kd_{1.0};
   double nullspace_damping_{0.01};
   double nullspace_max_torque_{0.2};
+  rclcpp::Time nullspace_start_time_;
 
   rclcpp::Time trajectory_start_time_;
 

@@ -14,6 +14,9 @@ controller_manager:
     wam_cartesian_controller:
       type: wam_cartesian_controller/WamCartesianController
 
+    wam_nullspace_controller:
+      type: wam_cartesian_controller/WamCartesianController
+
 arm_controller:
   ros__parameters:
     joints:
@@ -90,39 +93,51 @@ wam_cartesian_controller:
     trajectory_velocity: 0.05
     trajectory_acceleration: 0.05
 
+    # Translational Cartesian impedance gains for [x, y, z].
+    cartesian_kp: [30.0, 30.0, 30.0]
+    cartesian_kd: [10.0, 10.0, 10.0]
+
     # Secondary task: keep WAM joint 6 (wrist pitch) near -45 degrees.
+    nullspace_mode: "fixed"
+    nullspace_joint: 6
     nullspace_target: -0.7853981633974483
     nullspace_kp: 5.0
     nullspace_kd: 1.0
     nullspace_damping: 0.01
     nullspace_max_torque: 0.2
 
-    q_des:
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
+    torque_limits:
+      - 60.0
+      - 60.0
+      - 60.0
+      - 60.0
+      - 20.0
+      - 4.0
+      - 5.0
 
-    kp:
-      - 50.0
-      - 80.0
-      - 50.0
-      - 40.0
-      - 10.0
-      - 2.0
-      - 1.0
+wam_nullspace_controller:
+  ros__parameters:
+    root_link: "wam/base_link"
+    tip_link: "wam/wrist_palm_stump_link"
 
-    kd:
-      - 1.0
-      - 1.0
-      - 1.0
-      - 1.0
-      - 0.5
-      - 0.1
-      - 0.1
+    # Capture and hold the current XYZ position when this controller starts.
+    hold_current_position: true
+    trajectory_velocity: 0.05
+    trajectory_acceleration: 0.05
+
+    cartesian_kp: [30.0, 30.0, 30.0]
+    cartesian_kd: [10.0, 10.0, 10.0]
+
+    # Move joint 3 sinusoidally about its position at controller activation.
+    nullspace_mode: "sine"
+    nullspace_joint: 3
+    nullspace_target: 0.0  # Unused in sine mode.
+    nullspace_sine_amplitude: 0.6  # rad (about 34.4 degrees)
+    nullspace_sine_frequency: 0.1  # Hz
+    nullspace_kp: 5.0
+    nullspace_kd: 1.0
+    nullspace_damping: 0.01
+    nullspace_max_torque: 0.3
 
     torque_limits:
       - 60.0
