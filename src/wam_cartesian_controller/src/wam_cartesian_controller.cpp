@@ -46,6 +46,15 @@ WamCartesianController::init(const std::string & controller_name)
     "cartesian_kd",
     {10.0, 10.0, 10.0});
 
+  auto_declare<bool>("control_orientation", false);
+  auto_declare<std::vector<double>>(
+    "orientation_kp",
+    {10.0, 10.0, 10.0});
+  auto_declare<std::vector<double>>(
+    "orientation_kd",
+    {2.0, 2.0, 2.0});
+  auto_declare<double>("max_cartesian_moment", 2.0);
+
   auto_declare<std::vector<double>>(
     "torque_limits",
     {20.0, 20.0, 20.0, 20.0, 10.0, 10.0, 5.0});
@@ -134,6 +143,15 @@ WamCartesianController::on_configure(
   const auto cartesian_kd =
     get_node()->get_parameter("cartesian_kd").as_double_array();
 
+  control_orientation_ =
+    get_node()->get_parameter("control_orientation").as_bool();
+  const auto orientation_kp =
+    get_node()->get_parameter("orientation_kp").as_double_array();
+  const auto orientation_kd =
+    get_node()->get_parameter("orientation_kd").as_double_array();
+  max_cartesian_moment_ =
+    get_node()->get_parameter("max_cartesian_moment").as_double();
+
   torque_limits_ =
     get_node()->get_parameter("torque_limits").as_double_array();
 
@@ -174,11 +192,13 @@ WamCartesianController::on_configure(
   if (
     cartesian_kp.size() != 3 ||
     cartesian_kd.size() != 3 ||
+    orientation_kp.size() != 3 ||
+    orientation_kd.size() != 3 ||
     torque_limits_.size() != number_of_joints)
   {
     RCLCPP_ERROR(
       get_node()->get_logger(),
-      "cartesian_kp and cartesian_kd must contain 3 values; "
+      "Cartesian position and orientation gain vectors must contain 3 values; "
       "torque_limits must contain %zu values.",
       number_of_joints);
 
@@ -202,6 +222,27 @@ WamCartesianController::on_configure(
 
     cartesian_kp_(axis) = cartesian_kp[axis];
     cartesian_kd_(axis) = cartesian_kd[axis];
+
+    if (!std::isfinite(orientation_kp[axis]) || orientation_kp[axis] < 0.0 ||
+      !std::isfinite(orientation_kd[axis]) || orientation_kd[axis] < 0.0)
+    {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "Orientation gains must be finite and non-negative.");
+      return
+        rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+        CallbackReturn::ERROR;
+    }
+    orientation_kp_(axis) = orientation_kp[axis];
+    orientation_kd_(axis) = orientation_kd[axis];
+  }
+
+  if (!std::isfinite(max_cartesian_moment_) || max_cartesian_moment_ <= 0.0)
+  {
+    RCLCPP_ERROR(get_node()->get_logger(), "max_cartesian_moment must be positive.");
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
   }
 
   if (trajectory_velocity_ <= 0.0 || trajectory_acceleration_ <= 0.0)
@@ -214,7 +255,8 @@ WamCartesianController::on_configure(
       CallbackReturn::ERROR;
   }
 
-  if ((nullspace_mode_ != "fixed" && nullspace_mode_ != "sine") ||
+  if ((nullspace_mode_ != "disabled" && nullspace_mode_ != "fixed" &&
+    nullspace_mode_ != "sine") ||
     nullspace_joint < 1 || nullspace_joint > static_cast<int64_t>(number_of_joints) ||
     !std::isfinite(nullspace_target_) ||
     !std::isfinite(nullspace_sine_amplitude_) || nullspace_sine_amplitude_ < 0.0 ||
@@ -377,6 +419,18 @@ WamCartesianController::on_configure(
         &WamCartesianController::target_callback,
         this,
         std::placeholders::_1));
+
+  if (control_orientation_)
+  {
+    pose_target_subscription_ =
+      get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "~/target_pose",
+        rclcpp::SystemDefaultsQoS(),
+        std::bind(
+          &WamCartesianController::pose_target_callback,
+          this,
+          std::placeholders::_1));
+  }
 
   RCLCPP_INFO(
     get_node()->get_logger(),
@@ -604,6 +658,7 @@ WamCartesianController::on_activate(
   {
     std::lock_guard<std::mutex> lock(target_mutex_);
     target_pending_ = false;
+    orientation_target_pending_ = false;
   }
 
   return
@@ -644,6 +699,49 @@ void WamCartesianController::target_callback(
     get_node()->get_logger(),
     "Received Cartesian target [%.4f, %.4f, %.4f] in %s.",
     target(0), target(1), target(2), root_link_.c_str());
+}
+
+void WamCartesianController::pose_target_callback(
+  const geometry_msgs::msg::PoseStamped::SharedPtr message)
+{
+  if (!message->header.frame_id.empty() && message->header.frame_id != root_link_)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "Rejected pose target in frame '%s'; expected '%s'.",
+      message->header.frame_id.c_str(), root_link_.c_str());
+    return;
+  }
+
+  const Eigen::Vector3d position(
+    message->pose.position.x,
+    message->pose.position.y,
+    message->pose.position.z);
+  Eigen::Quaterniond orientation(
+    message->pose.orientation.w,
+    message->pose.orientation.x,
+    message->pose.orientation.y,
+    message->pose.orientation.z);
+
+  if (!position.allFinite() || !orientation.coeffs().allFinite() ||
+    orientation.norm() < 1e-9)
+  {
+    RCLCPP_ERROR(get_node()->get_logger(), "Rejected invalid Cartesian pose target.");
+    return;
+  }
+  orientation.normalize();
+
+  {
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    pending_target_position_ = position;
+    pending_target_orientation_ = orientation;
+    target_pending_ = true;
+    orientation_target_pending_ = true;
+  }
+
+  RCLCPP_INFO(
+    get_node()->get_logger(),
+    "Received Cartesian pose target in %s.", root_link_.c_str());
 }
 
 rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
@@ -781,6 +879,15 @@ WamCartesianController::update()
     end_effector_pose_.p.y(),
     end_effector_pose_.p.z();
 
+  double orientation_x = 0.0;
+  double orientation_y = 0.0;
+  double orientation_z = 0.0;
+  double orientation_w = 1.0;
+  end_effector_pose_.M.GetQuaternion(
+    orientation_x, orientation_y, orientation_z, orientation_w);
+  current_orientation_ = Eigen::Quaterniond(
+    orientation_w, orientation_x, orientation_y, orientation_z).normalized();
+
   // On activation, hold the measured end-effector position. Motion begins
   // only after an external target is received.
   if (!trajectory_initialized_)
@@ -788,6 +895,7 @@ WamCartesianController::update()
     trajectory_start_position_ = current_position_;
     trajectory_target_position_ = current_position_;
     desired_position_ = current_position_;
+    desired_orientation_ = current_orientation_;
     desired_linear_velocity_.setZero();
     trajectory_initialized_ = true;
     trajectory_active_ = false;
@@ -800,7 +908,9 @@ WamCartesianController::update()
 
   // Copy a newly received target without blocking the real-time update loop.
   Eigen::Vector3d new_target;
+  Eigen::Quaterniond new_orientation = desired_orientation_;
   bool have_new_target = false;
+  bool have_new_orientation = false;
   if (target_mutex_.try_lock())
   {
     if (target_pending_)
@@ -809,11 +919,21 @@ WamCartesianController::update()
       target_pending_ = false;
       have_new_target = true;
     }
+    if (orientation_target_pending_)
+    {
+      new_orientation = pending_target_orientation_;
+      orientation_target_pending_ = false;
+      have_new_orientation = true;
+    }
     target_mutex_.unlock();
   }
 
   if (have_new_target)
   {
+    if (have_new_orientation)
+    {
+      desired_orientation_ = new_orientation;
+    }
     // Replanning starts from the measured position. This is intentional for
     // manual, point-to-point commands sent after the previous move completes.
     trajectory_start_position_ = current_position_;
@@ -919,6 +1039,10 @@ WamCartesianController::update()
     cartesian_velocity_[0],
     cartesian_velocity_[1],
     cartesian_velocity_[2];
+  angular_velocity_ <<
+    cartesian_velocity_[3],
+    cartesian_velocity_[4],
+    cartesian_velocity_[5];
 
 
 
@@ -997,12 +1121,37 @@ WamCartesianController::update()
           max_cartesian_force));
   }
 
+  cartesian_moment_.setZero();
+  orientation_error_.setZero();
+  if (control_orientation_)
+  {
+    Eigen::Quaterniond orientation_delta =
+      desired_orientation_ * current_orientation_.conjugate();
+    if (orientation_delta.w() < 0.0)
+    {
+      orientation_delta.coeffs() *= -1.0;
+    }
+    orientation_delta.normalize();
+    const Eigen::AngleAxisd angle_axis(orientation_delta);
+    orientation_error_ = angle_axis.axis() * angle_axis.angle();
+    cartesian_moment_ =
+      orientation_kp_.cwiseProduct(orientation_error_) -
+      orientation_kd_.cwiseProduct(angular_velocity_);
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      cartesian_moment_(axis) = std::max(
+        -max_cartesian_moment_,
+        std::min(cartesian_moment_(axis), max_cartesian_moment_));
+    }
+  }
+
   // ---------------------------------------------------------
-  // 7. Position-only Cartesian wrench
-  // W = [Fx, Fy, Fz, 0, 0, 0]^T
+  // 7. Cartesian wrench. The moment remains zero in position-only mode.
+  // W = [Fx, Fy, Fz, Mx, My, Mz]^T
   // ---------------------------------------------------------
   cartesian_wrench_.setZero();
   cartesian_wrench_.head<3>() = cartesian_force_;
+  cartesian_wrench_.tail<3>() = cartesian_moment_;
 
   // ---------------------------------------------------------
   // 8. Cartesian joint torque: tau_cart = J^T W
@@ -1029,41 +1178,70 @@ WamCartesianController::update()
   // ---------------------------------------------------------
   // 9. Damped Moore-Penrose null-space posture control
   // ---------------------------------------------------------
-  const Eigen::Matrix<double, 3, 7> translational_jacobian =
-    jacobian_eigen_.topRows<3>();
-  Eigen::Matrix3d damped_jacobian_product =
-    translational_jacobian * translational_jacobian.transpose();
-  damped_jacobian_product.diagonal().array() +=
-    nullspace_damping_ * nullspace_damping_;
-
-  const Eigen::LDLT<Eigen::Matrix3d> jacobian_decomposition(
-    damped_jacobian_product);
-  if (jacobian_decomposition.info() != Eigen::Success)
+  Eigen::Matrix<double, 7, 7> torque_nullspace_projector;
+  if (control_orientation_)
   {
-    RCLCPP_ERROR_THROTTLE(
-      get_node()->get_logger(),
-      *get_node()->get_clock(),
-      2000,
-      "Failed to factor the damped Jacobian product.");
-    for (auto & command_interface : command_interfaces_)
+    Eigen::Matrix<double, 6, 6> damped_jacobian_product =
+      jacobian_eigen_ * jacobian_eigen_.transpose();
+    damped_jacobian_product.diagonal().array() +=
+      nullspace_damping_ * nullspace_damping_;
+    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> decomposition(
+      damped_jacobian_product);
+    if (decomposition.info() != Eigen::Success)
     {
-      command_interface.set_value(0.0);
+      RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 2000,
+        "Failed to factor the damped full-Jacobian product.");
+      for (auto & command_interface : command_interfaces_)
+      {
+        command_interface.set_value(0.0);
+      }
+      return controller_interface::return_type::ERROR;
     }
-    return controller_interface::return_type::ERROR;
+    const Eigen::Matrix<double, 7, 6> pseudoinverse =
+      jacobian_eigen_.transpose() *
+      decomposition.solve(Eigen::Matrix<double, 6, 6>::Identity());
+    torque_nullspace_projector =
+      Eigen::Matrix<double, 7, 7>::Identity() -
+      jacobian_eigen_.transpose() * pseudoinverse.transpose();
   }
-
-  const Eigen::Matrix<double, 7, 3> damped_pseudoinverse =
-    translational_jacobian.transpose() *
-    jacobian_decomposition.solve(Eigen::Matrix3d::Identity());
-  const Eigen::Matrix<double, 7, 7> torque_nullspace_projector =
-    Eigen::Matrix<double, 7, 7>::Identity() -
-    translational_jacobian.transpose() * damped_pseudoinverse.transpose();
+  else
+  {
+    const Eigen::Matrix<double, 3, 7> translational_jacobian =
+      jacobian_eigen_.topRows<3>();
+    Eigen::Matrix3d damped_jacobian_product =
+      translational_jacobian * translational_jacobian.transpose();
+    damped_jacobian_product.diagonal().array() +=
+      nullspace_damping_ * nullspace_damping_;
+    const Eigen::LDLT<Eigen::Matrix3d> decomposition(damped_jacobian_product);
+    if (decomposition.info() != Eigen::Success)
+    {
+      RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 2000,
+        "Failed to factor the damped translational-Jacobian product.");
+      for (auto & command_interface : command_interfaces_)
+      {
+        command_interface.set_value(0.0);
+      }
+      return controller_interface::return_type::ERROR;
+    }
+    const Eigen::Matrix<double, 7, 3> pseudoinverse =
+      translational_jacobian.transpose() *
+      decomposition.solve(Eigen::Matrix3d::Identity());
+    torque_nullspace_projector =
+      Eigen::Matrix<double, 7, 7>::Identity() -
+      translational_jacobian.transpose() * pseudoinverse.transpose();
+  }
 
   Eigen::Matrix<double, 7, 1> raw_posture_torque =
     Eigen::Matrix<double, 7, 1>::Zero();
-  double posture_target = nullspace_target_;
+  double posture_target = q_[nullspace_joint_index_];
   double posture_velocity_target = 0.0;
-  if (nullspace_mode_ == "sine")
+  if (nullspace_mode_ == "fixed")
+  {
+    posture_target = nullspace_target_;
+  }
+  else if (nullspace_mode_ == "sine")
   {
     constexpr double two_pi = 6.28318530717958647692;
     const double elapsed =
@@ -1076,9 +1254,13 @@ WamCartesianController::update()
   }
 
   const double posture_error = posture_target - q_[nullspace_joint_index_];
-  const double posture_torque =
-    nullspace_kp_ * posture_error +
-    nullspace_kd_ * (posture_velocity_target - dq_[nullspace_joint_index_]);
+  double posture_torque = 0.0;
+  if (nullspace_mode_ != "disabled")
+  {
+    posture_torque =
+      nullspace_kp_ * posture_error +
+      nullspace_kd_ * (posture_velocity_target - dq_[nullspace_joint_index_]);
+  }
   raw_posture_torque(nullspace_joint_index_) =
     std::max(
       -nullspace_max_torque_,

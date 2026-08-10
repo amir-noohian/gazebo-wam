@@ -142,21 +142,35 @@ def generate_launch_description():
                 "echo 'Loading joint-space model controller'; "
 
                 "ros2 run controller_manager spawner.py "
-                "wam_model_controller "
+                "wam_joint_controller "
                 "--controller-manager /controller_manager "
                 "--stopped; "
 
                 "echo 'Loading Cartesian controller'; "
 
                 "ros2 run controller_manager spawner.py "
-                "wam_cartesian_controller "
+                "wam_position_controller "
                 "--controller-manager /controller_manager "
                 "--stopped; "
 
                 "echo 'Loading null-space sinusoid controller'; "
 
                 "ros2 run controller_manager spawner.py "
-                "wam_nullspace_controller "
+                "wam_position_ns_controller "
+                "--controller-manager /controller_manager "
+                "--stopped; "
+
+                "echo 'Loading full-pose Cartesian controller'; "
+
+                "ros2 run controller_manager spawner.py "
+                "wam_pose_controller "
+                "--controller-manager /controller_manager "
+                "--stopped; "
+
+                "echo 'Loading full-pose null-space controller'; "
+
+                "ros2 run controller_manager spawner.py "
+                "wam_pose_ns_controller "
                 "--controller-manager /controller_manager "
                 "--stopped; "
 
@@ -167,7 +181,7 @@ def generate_launch_description():
                 "controller_manager_msgs/srv/SwitchController "
                 "\"{"
                 "start_controllers: "
-                "[joint_state_broadcaster, wam_model_controller], "
+                "[joint_state_broadcaster, wam_joint_controller], "
                 "stop_controllers: [], "
                 "strictness: 2, "
                 "start_asap: true, "

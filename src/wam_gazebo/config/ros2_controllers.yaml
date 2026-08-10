@@ -8,13 +8,19 @@ controller_manager:
     arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController
       
-    wam_model_controller:
+    wam_joint_controller:
       type: wam_model_controller/WamModelController
     
-    wam_cartesian_controller:
+    wam_position_controller:
       type: wam_cartesian_controller/WamCartesianController
 
-    wam_nullspace_controller:
+    wam_position_ns_controller:
+      type: wam_cartesian_controller/WamCartesianController
+
+    wam_pose_controller:
+      type: wam_cartesian_controller/WamCartesianController
+
+    wam_pose_ns_controller:
       type: wam_cartesian_controller/WamCartesianController
 
 arm_controller:
@@ -35,7 +41,7 @@ arm_controller:
       - position
       - velocity
 
-wam_model_controller:
+wam_joint_controller:
   ros__parameters:
     root_link: "wam/base_link"
     tip_link: "wam/wrist_palm_link"
@@ -82,7 +88,7 @@ wam_model_controller:
       - 10.0
       - 10.0
 
-wam_cartesian_controller:
+wam_position_controller:
   ros__parameters:
     root_link: "wam/base_link"
     # Tool-center point: 6 cm along the palm link's local +Z axis.
@@ -96,9 +102,10 @@ wam_cartesian_controller:
     # Translational Cartesian impedance gains for [x, y, z].
     cartesian_kp: [30.0, 30.0, 30.0]
     cartesian_kd: [10.0, 10.0, 10.0]
+    control_orientation: false
 
-    # Secondary task: keep WAM joint 6 (wrist pitch) near -45 degrees.
-    nullspace_mode: "fixed"
+    # No secondary posture task in the position-command controller.
+    nullspace_mode: "disabled"
     nullspace_joint: 6
     nullspace_target: -0.7853981633974483
     nullspace_kp: 5.0
@@ -115,7 +122,7 @@ wam_cartesian_controller:
       - 4.0
       - 5.0
 
-wam_nullspace_controller:
+wam_position_ns_controller:
   ros__parameters:
     root_link: "wam/base_link"
     tip_link: "wam/wrist_palm_stump_link"
@@ -127,12 +134,84 @@ wam_nullspace_controller:
 
     cartesian_kp: [30.0, 30.0, 30.0]
     cartesian_kd: [10.0, 10.0, 10.0]
+    control_orientation: false
 
     # Move joint 3 sinusoidally about its position at controller activation.
     nullspace_mode: "sine"
     nullspace_joint: 3
     nullspace_target: 0.0  # Unused in sine mode.
     nullspace_sine_amplitude: 0.6  # rad (about 34.4 degrees)
+    nullspace_sine_frequency: 0.1  # Hz
+    nullspace_kp: 5.0
+    nullspace_kd: 1.0
+    nullspace_damping: 0.01
+    nullspace_max_torque: 0.3
+
+    torque_limits:
+      - 60.0
+      - 60.0
+      - 60.0
+      - 60.0
+      - 20.0
+      - 4.0
+      - 5.0
+
+wam_pose_controller:
+  ros__parameters:
+    root_link: "wam/base_link"
+    tip_link: "wam/wrist_palm_stump_link"
+
+    hold_current_position: true
+    trajectory_velocity: 0.05
+    trajectory_acceleration: 0.05
+
+    cartesian_kp: [30.0, 30.0, 30.0]
+    cartesian_kd: [10.0, 10.0, 10.0]
+    control_orientation: true
+    orientation_kp: [1.0, 1.0, 1.0]
+    orientation_kd: [0.1, 0.1, 0.1]
+    max_cartesian_moment: 2.0
+
+    # No secondary posture task in the pose-command controller.
+    nullspace_mode: "disabled"
+    nullspace_joint: 6
+    nullspace_target: -0.7853981633974483
+    nullspace_kp: 5.0
+    nullspace_kd: 1.0
+    nullspace_damping: 0.01
+    nullspace_max_torque: 0.2
+
+    torque_limits:
+      - 60.0
+      - 60.0
+      - 60.0
+      - 60.0
+      - 20.0
+      - 4.0
+      - 5.0
+
+wam_pose_ns_controller:
+  ros__parameters:
+    root_link: "wam/base_link"
+    tip_link: "wam/wrist_palm_stump_link"
+
+    # Capture and hold the complete activation pose.
+    hold_current_position: true
+    trajectory_velocity: 0.05
+    trajectory_acceleration: 0.05
+
+    cartesian_kp: [30.0, 30.0, 30.0]
+    cartesian_kd: [10.0, 10.0, 10.0]
+    control_orientation: true
+    orientation_kp: [1.0, 1.0, 1.0]
+    orientation_kd: [0.1, 0.1, 0.1]
+    max_cartesian_moment: 2.0
+
+    # Apply the sine task through the null space of the full 6x7 Jacobian.
+    nullspace_mode: "sine"
+    nullspace_joint: 3
+    nullspace_target: 0.0  # Unused in sine mode.
+    nullspace_sine_amplitude: 1.0  # rad (about 57.3 degrees)
     nullspace_sine_frequency: 0.1  # Hz
     nullspace_kp: 5.0
     nullspace_kd: 1.0

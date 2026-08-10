@@ -15,7 +15,7 @@ public:
       "/controller_manager/switch_controller");
 
     completion_subscription_ = create_subscription<std_msgs::msg::Bool>(
-      "/wam_model_controller/trajectory_complete",
+      "/wam_joint_controller/trajectory_complete",
       rclcpp::SystemDefaultsQoS(),
       [this](const std_msgs::msg::Bool::SharedPtr message)
       {
@@ -46,8 +46,8 @@ private:
     switch_requested_ = true;
     auto request =
       std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    request->start_controllers = {"wam_cartesian_controller"};
-    request->stop_controllers = {"wam_model_controller"};
+    request->start_controllers = {"wam_pose_ns_controller"};
+    request->stop_controllers = {"wam_joint_controller"};
     request->strictness =
       controller_manager_msgs::srv::SwitchController::Request::STRICT;
     request->start_asap = true;
@@ -56,7 +56,7 @@ private:
 
     RCLCPP_INFO(
       get_logger(),
-      "Joint trajectory completed; switching to Cartesian control.");
+      "Joint trajectory completed; switching to full-pose null-space control.");
 
     switch_client_->async_send_request(
       request,
@@ -65,7 +65,7 @@ private:
         if (future.get()->ok) {
           RCLCPP_INFO(
             get_logger(),
-            "Automatic controller switch succeeded; Cartesian targets are now accepted.");
+            "Automatic controller switch succeeded; full-pose null-space control is active.");
         } else {
           RCLCPP_ERROR(get_logger(), "Automatic controller switch failed.");
           switch_requested_ = false;

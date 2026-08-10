@@ -10,6 +10,7 @@
 #include <Eigen/Dense>
 
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include <kdl/chain.hpp>
 #include <kdl/chaindynparam.hpp>
@@ -57,6 +58,7 @@ public:
 
 private:
   void target_callback(const geometry_msgs::msg::PointStamped::SharedPtr message);
+  void pose_target_callback(const geometry_msgs::msg::PoseStamped::SharedPtr message);
 
   std::vector<std::string> joint_names_;
 
@@ -89,6 +91,15 @@ private:
   Eigen::Vector3d cartesian_kd_;
   Eigen::Vector3d linear_velocity_;
   Eigen::Vector3d cartesian_force_;
+  Eigen::Quaterniond desired_orientation_{Eigen::Quaterniond::Identity()};
+  Eigen::Quaterniond current_orientation_{Eigen::Quaterniond::Identity()};
+  Eigen::Vector3d orientation_error_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d angular_velocity_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d orientation_kp_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d orientation_kd_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d cartesian_moment_{Eigen::Vector3d::Zero()};
+  bool control_orientation_{false};
+  double max_cartesian_moment_{2.0};
 
   Eigen::Matrix<double, 6, 1> cartesian_wrench_;
   Eigen::Matrix<double, 6, 7> jacobian_eigen_;
@@ -112,9 +123,12 @@ private:
   Eigen::Vector3d desired_linear_velocity_;
 
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr target_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_target_subscription_;
   std::mutex target_mutex_;
   Eigen::Vector3d pending_target_position_;
+  Eigen::Quaterniond pending_target_orientation_{Eigen::Quaterniond::Identity()};
   bool target_pending_{false};
+  bool orientation_target_pending_{false};
 
   // Secondary posture task. The joint index is zero based internally.
   std::string nullspace_mode_{"fixed"};
