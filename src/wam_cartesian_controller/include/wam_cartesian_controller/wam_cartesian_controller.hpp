@@ -11,6 +11,8 @@
 
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <realtime_tools/realtime_publisher.h>
 
 #include <kdl/chain.hpp>
 #include <kdl/chaindynparam.hpp>
@@ -142,6 +144,21 @@ private:
   double nullspace_damping_{0.01};
   double nullspace_max_torque_{0.2};
   rclcpp::Time nullspace_start_time_;
+  Eigen::Matrix<double, 7, 1> experiment_desired_q_{
+    Eigen::Matrix<double, 7, 1>::Zero()};
+  Eigen::Matrix<double, 7, 1> experiment_initial_q_{
+    Eigen::Matrix<double, 7, 1>::Zero()};
+  Eigen::Matrix<double, 7, 1> experiment_null_direction_{
+    Eigen::Matrix<double, 7, 1>::Zero()};
+  Eigen::Matrix<double, 7, 7> experiment_nullspace_projector_{
+    Eigen::Matrix<double, 7, 7>::Identity()};
+  bool experiment_initialized_{false};
+  double manipulability_characteristic_length_{0.3};
+  double metrics_publish_rate_{20.0};
+  rclcpp::Time last_metrics_publish_time_;
+  std::shared_ptr<
+    realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>
+  metrics_publisher_;
 
   rclcpp::Time trajectory_start_time_;
 

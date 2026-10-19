@@ -203,20 +203,22 @@ wam_pose_ns_controller:
     cartesian_kp: [30.0, 30.0, 30.0]
     cartesian_kd: [10.0, 10.0, 10.0]
     control_orientation: true
-    orientation_kp: [1.0, 1.0, 1.0]
-    orientation_kd: [0.1, 0.1, 0.1]
+    orientation_kp: [2.0, 2.0, 2.0]
+    orientation_kd: [0.2, 0.2, 0.2]
     max_cartesian_moment: 2.0
 
-    # Apply the sine task through the null space of the full 6x7 Jacobian.
-    nullspace_mode: "sine"
+    # Capture the initial SVD null direction and projector, then keep both fixed.
+    nullspace_mode: "svd"
     nullspace_joint: 3
-    nullspace_target: 0.0  # Unused in sine mode.
-    nullspace_sine_amplitude: 1.0  # rad (about 57.3 degrees)
+    nullspace_target: 0.0  # Unused in SVD mode.
+    nullspace_sine_amplitude: 2.0  # rad (about 57.3 degrees)
     nullspace_sine_frequency: 0.1  # Hz
     nullspace_kp: 5.0
     nullspace_kd: 1.0
     nullspace_damping: 0.01
-    nullspace_max_torque: 0.3
+    nullspace_max_torque: 0.6
+    manipulability_characteristic_length: 0.3
+    metrics_publish_rate: 20.0
 
     torque_limits:
       - 60.0

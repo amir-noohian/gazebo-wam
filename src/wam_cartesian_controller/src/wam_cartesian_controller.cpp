@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -74,6 +75,8 @@ WamCartesianController::init(const std::string & controller_name)
   auto_declare<double>("nullspace_kd", 1.0);
   auto_declare<double>("nullspace_damping", 0.01);
   auto_declare<double>("nullspace_max_torque", 0.2);
+  auto_declare<double>("manipulability_characteristic_length", 0.3);
+  auto_declare<double>("metrics_publish_rate", 20.0);
 
   auto_declare<std::string>(
     "root_link",
@@ -182,6 +185,10 @@ WamCartesianController::on_configure(
     get_node()->get_parameter("nullspace_damping").as_double();
   nullspace_max_torque_ =
     get_node()->get_parameter("nullspace_max_torque").as_double();
+  manipulability_characteristic_length_ =
+    get_node()->get_parameter("manipulability_characteristic_length").as_double();
+  metrics_publish_rate_ =
+    get_node()->get_parameter("metrics_publish_rate").as_double();
 
   root_link_ =
     get_node()->get_parameter("root_link").as_string();
@@ -256,16 +263,28 @@ WamCartesianController::on_configure(
   }
 
   if ((nullspace_mode_ != "disabled" && nullspace_mode_ != "fixed" &&
-    nullspace_mode_ != "sine") ||
+    nullspace_mode_ != "sine" && nullspace_mode_ != "svd") ||
     nullspace_joint < 1 || nullspace_joint > static_cast<int64_t>(number_of_joints) ||
     !std::isfinite(nullspace_target_) ||
     !std::isfinite(nullspace_sine_amplitude_) || nullspace_sine_amplitude_ < 0.0 ||
     !std::isfinite(nullspace_sine_frequency_) || nullspace_sine_frequency_ <= 0.0 ||
     nullspace_kp_ < 0.0 ||
     nullspace_kd_ < 0.0 || nullspace_damping_ <= 0.0 ||
-    nullspace_max_torque_ <= 0.0)
+    nullspace_max_torque_ <= 0.0 ||
+    !std::isfinite(manipulability_characteristic_length_) ||
+    manipulability_characteristic_length_ <= 0.0 ||
+    !std::isfinite(metrics_publish_rate_) || metrics_publish_rate_ <= 0.0)
   {
     RCLCPP_ERROR(get_node()->get_logger(), "One or more null-space parameters are invalid.");
+    return
+      rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+      CallbackReturn::ERROR;
+  }
+  if (nullspace_mode_ == "svd" && !control_orientation_)
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "SVD null-space exploration requires control_orientation=true.");
     return
       rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
       CallbackReturn::ERROR;
@@ -431,6 +450,15 @@ WamCartesianController::on_configure(
           this,
           std::placeholders::_1));
   }
+
+
+  auto metrics_ros_publisher =
+    get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+      "~/manipulability_metrics", rclcpp::SystemDefaultsQoS());
+  metrics_publisher_ = std::make_shared<
+    realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(
+      metrics_ros_publisher);
+  metrics_publisher_->msg_.data.resize(37);
 
   RCLCPP_INFO(
     get_node()->get_logger(),
@@ -606,6 +634,8 @@ WamCartesianController::on_activate(
 
   nullspace_sine_center_ = q_[nullspace_joint_index_];
   nullspace_start_time_ = get_node()->now();
+  experiment_initialized_ = false;
+  last_metrics_publish_time_ = nullspace_start_time_;
 
   const int gravity_result =
     kdl_dynamics_solver_->JntToGravity(
@@ -1178,6 +1208,8 @@ WamCartesianController::update()
   // ---------------------------------------------------------
   // 9. Damped Moore-Penrose null-space posture control
   // ---------------------------------------------------------
+  const Eigen::JacobiSVD<Eigen::Matrix<double, 6, 7>> full_jacobian_svd(
+    jacobian_eigen_, Eigen::ComputeFullV);
   Eigen::Matrix<double, 7, 7> torque_nullspace_projector;
   if (control_orientation_)
   {
@@ -1237,6 +1269,8 @@ WamCartesianController::update()
     Eigen::Matrix<double, 7, 1>::Zero();
   double posture_target = q_[nullspace_joint_index_];
   double posture_velocity_target = 0.0;
+  double experiment_phase = 0.0;
+  double experiment_phase_velocity = 0.0;
   if (nullspace_mode_ == "fixed")
   {
     posture_target = nullspace_target_;
@@ -1253,18 +1287,68 @@ WamCartesianController::update()
       std::cos(angular_frequency * elapsed);
   }
 
+  if (nullspace_mode_ == "svd")
+  {
+    const rclcpp::Time now = get_node()->now();
+
+    if (!experiment_initialized_)
+    {
+      for (std::size_t joint = 0; joint < joint_names_.size(); ++joint)
+      {
+        experiment_initial_q_(joint) = q_[joint];
+      }
+      experiment_desired_q_ = experiment_initial_q_;
+      experiment_null_direction_ =
+        full_jacobian_svd.matrixV().col(6).normalized();
+      experiment_nullspace_projector_ = torque_nullspace_projector;
+      experiment_initialized_ = true;
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Captured the initial full-pose null direction; it will remain fixed.");
+    }
+    torque_nullspace_projector = experiment_nullspace_projector_;
+
+    constexpr double two_pi = 6.28318530717958647692;
+    const double elapsed =
+      std::max(0.0, (now - nullspace_start_time_).seconds());
+    const double angular_frequency = two_pi * nullspace_sine_frequency_;
+    experiment_phase =
+      nullspace_sine_amplitude_ * std::sin(angular_frequency * elapsed);
+    experiment_phase_velocity =
+      nullspace_sine_amplitude_ * angular_frequency *
+      std::cos(angular_frequency * elapsed);
+    experiment_desired_q_ =
+      experiment_initial_q_ + experiment_null_direction_ * experiment_phase;
+
+    for (std::size_t joint = 0; joint < joint_names_.size(); ++joint)
+    {
+      raw_posture_torque(joint) =
+        nullspace_kp_ * (experiment_desired_q_(joint) - q_[joint]) +
+        nullspace_kd_ *
+        (experiment_null_direction_(joint) * experiment_phase_velocity - dq_[joint]);
+    }
+  }
+
   const double posture_error = posture_target - q_[nullspace_joint_index_];
   double posture_torque = 0.0;
-  if (nullspace_mode_ != "disabled")
+  if (nullspace_mode_ != "disabled" && nullspace_mode_ != "svd")
   {
     posture_torque =
       nullspace_kp_ * posture_error +
       nullspace_kd_ * (posture_velocity_target - dq_[nullspace_joint_index_]);
   }
-  raw_posture_torque(nullspace_joint_index_) =
-    std::max(
-      -nullspace_max_torque_,
-      std::min(posture_torque, nullspace_max_torque_));
+  if (nullspace_mode_ != "svd")
+  {
+    raw_posture_torque(nullspace_joint_index_) = std::max(
+        -nullspace_max_torque_,
+        std::min(posture_torque, nullspace_max_torque_));
+  }
+
+  const double raw_torque_norm = raw_posture_torque.norm();
+  if (raw_torque_norm > nullspace_max_torque_)
+  {
+    raw_posture_torque *= nullspace_max_torque_ / raw_torque_norm;
+  }
   nullspace_torque_ = torque_nullspace_projector * raw_posture_torque;
 
   // Scale the complete projected vector so the secondary task cannot exceed
@@ -1287,6 +1371,67 @@ WamCartesianController::update()
       command_interface.set_value(0.0);
     }
     return controller_interface::return_type::ERROR;
+  }
+
+  const rclcpp::Time metrics_now = get_node()->now();
+  if (metrics_publisher_ &&
+    (metrics_now - last_metrics_publish_time_).seconds() >=
+    1.0 / metrics_publish_rate_ && metrics_publisher_->trylock())
+  {
+    const Eigen::Matrix<double, 3, 7> translational_jacobian =
+      jacobian_eigen_.topRows<3>();
+    const Eigen::Matrix<double, 3, 7> rotational_jacobian =
+      jacobian_eigen_.bottomRows<3>();
+    const Eigen::JacobiSVD<Eigen::Matrix<double, 3, 7>> translational_svd(
+      translational_jacobian);
+    const Eigen::JacobiSVD<Eigen::Matrix<double, 3, 7>> rotational_svd(
+      rotational_jacobian);
+    const Eigen::Matrix3d wrist_jacobian =
+      jacobian_eigen_.block<3, 3>(3, 4);
+    const Eigen::JacobiSVD<Eigen::Matrix3d> wrist_svd(wrist_jacobian);
+    Eigen::Matrix<double, 6, 7> scaled_jacobian = jacobian_eigen_;
+    scaled_jacobian.bottomRows<3>() *= manipulability_characteristic_length_;
+    const Eigen::JacobiSVD<Eigen::Matrix<double, 6, 7>> scaled_svd(
+      scaled_jacobian);
+
+    const auto product = [](const auto & values) {
+        double result = 1.0;
+        for (Eigen::Index i = 0; i < values.size(); ++i) {
+          result *= values(i);
+        }
+        return result;
+      };
+    const auto condition_number = [](const auto & values) {
+        const double minimum = values(values.size() - 1);
+        return minimum > 1e-12 ? values(0) / minimum :
+          std::numeric_limits<double>::infinity();
+      };
+
+    auto & data = metrics_publisher_->msg_.data;
+    data[0] = (metrics_now - nullspace_start_time_).seconds();
+    data[1] = experiment_phase;
+    data[2] = experiment_phase_velocity;
+    data[3] = position_error_.norm();
+    data[4] = orientation_error_.norm();
+    data[5] = product(translational_svd.singularValues());
+    data[6] = product(rotational_svd.singularValues());
+    data[7] = product(wrist_svd.singularValues());
+    data[8] = product(full_jacobian_svd.singularValues());
+    data[9] = product(scaled_svd.singularValues());
+    data[10] = translational_svd.singularValues()(2);
+    data[11] = condition_number(translational_svd.singularValues());
+    data[12] = rotational_svd.singularValues()(2);
+    data[13] = condition_number(rotational_svd.singularValues());
+    data[14] = full_jacobian_svd.singularValues()(5);
+    data[15] = condition_number(full_jacobian_svd.singularValues());
+    for (std::size_t joint = 0; joint < joint_names_.size(); ++joint)
+    {
+      data[16 + joint] = q_[joint];
+      data[23 + joint] = experiment_desired_q_(joint);
+      data[30 + joint] = experiment_null_direction_(joint);
+    }
+    last_metrics_publish_time_ = metrics_now;
+    metrics_publisher_->unlockAndPublish();
   }
 
   // ---------------------------------------------------------

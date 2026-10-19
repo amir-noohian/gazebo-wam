@@ -89,6 +89,17 @@ def generate_launch_description():
         output="screen",
     )
 
+    manipulability_logger = Node(
+        package="wam_gazebo",
+        executable="manipulability_logger.py",
+        name="wam_manipulability_logger",
+        output="screen",
+        parameters=[{
+            "topic": "/wam_pose_ns_controller/manipulability_metrics",
+            "output_directory": os.path.join(os.getcwd(), "data"),
+        }],
+    )
+
     # ---------------------------------------------------------
     # Spawn the WAM in Gazebo
     # ---------------------------------------------------------
@@ -222,6 +233,7 @@ def generate_launch_description():
         gazebo,
         robot_state_publisher,
         controller_switcher,
+        manipulability_logger,
         spawn_wam,
         start_controllers_after_spawn,
     ])
